@@ -122,6 +122,13 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line
 th { color: var(--ink-muted); font-weight: 600; font-size: 11px; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 tr.virtual td { color: var(--ink-muted); font-style: italic; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.chip { font: inherit; font-size: 12px; cursor: pointer; padding: 6px 10px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--panel); color: var(--brand-700); }
+.chip.active { background: var(--brand-600); border-color: var(--brand-600); color: #fff; font-weight: 600; }
+button.rowlink { font: inherit; font-size: inherit; cursor: pointer; background: none; border: 0; padding: 0; margin: 0; color: var(--brand-600); text-decoration: underline; text-underline-offset: 2px; }
+tr[data-trip], tr[data-stop] { cursor: pointer; }
+tr[data-trip]:hover, tr[data-stop]:hover { background: var(--tint); }
+ul.findings li button.rowlink { display: block; margin-top: 4px; font-size: 12px; }
 #map { height: 320px; border-radius: 8px; background: var(--tint); }
 @media (min-width: 620px) { #map { height: 420px; } }
 .quality { font-size: 12px; color: var(--ink-muted); margin: 12px 0 0; }

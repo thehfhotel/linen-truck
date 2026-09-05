@@ -95,6 +95,9 @@ export const LABELS = {
   // ── map ───────────────────────────────────────────────────────────────────
   mapHeading: { th: "เส้นทาง", en: "Route" },
   mapUnavailable: { th: "ไม่มีข้อมูลเส้นทางของวันนี้", en: "No route data for this day" },
+  allDayChip: { th: "ทั้งวัน", en: "All day" },
+  showTripOnMap: { th: "ดูเที่ยวนี้บนแผนที่", en: "Show this trip on the map" },
+  showStopOnMap: { th: "ดูจุดนี้บนแผนที่", en: "Show this stop on the map" },
 
   // ── week table ────────────────────────────────────────────────────────────
   colDate: { th: "วันที่", en: "Date" },
@@ -141,3 +144,6 @@ export const outsideHoursText = (start: string, end: string, km: number): L => (
 
 /** `4 นาที` · `4 min` — the duration suffix every table cell shares. */
 export const minutesText = (minutes: number): L => ({ th: `${minutes} นาที`, en: `${minutes} min` });
+
+/** `เที่ยว 3` · `Trip 3` — the trip chip / row-selector label (day page map filter). */
+export const tripLabel = (n: number): L => ({ th: `เที่ยว ${n}`, en: `Trip ${n}` });

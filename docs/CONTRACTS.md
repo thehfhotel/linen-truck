@@ -195,6 +195,9 @@ Branding: HF One staff burgundy like feedback's /staff (not the crimson guest pa
   "dataQuality": { "lastPollAt": 1788599000, "lastPollOk": true, "note": null } }
 ```
 `/api/week` and `/feed/range` return the same objects without `trips`, `stops`, `legs`, `path` (findings kept).
+Additive since 2026-09-05 (map filtering): trips also carry `startAt`/`endAt` (epoch s), stops `arriveAt`/`departAt`,
+unknown-stop findings `stopIndex` (index into `stops`), outside-hours findings `startAt`/`endAt`. Day page selection is
+mirrored in the URL hash (`#all`, `#trip-N`, `#trip-N-M` for a detour leg, `#stop-I`) and applied on load.
 Rounding happens only in the report layer: km to 1 dp, ratio to 2 dp of the unrounded quotient, minutes floored.
 
 ## 10. Scripts (rev 2)

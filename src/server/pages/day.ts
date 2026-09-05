@@ -11,7 +11,7 @@
 // script cannot fetch — the site circles and the handful of label strings.
 
 import type { Site } from "../../domain/types.ts";
-import { LABELS, pair, type L } from "../../shared/labels.ts";
+import { LABELS, pair, tripLabel, type L } from "../../shared/labels.ts";
 import { bangkokStamp, type DayReport, type ReportStop, type ReportTrip } from "../report.ts";
 import {
   escapeHtml,
@@ -41,9 +41,12 @@ function siteLabel(sites: readonly Site[], id: string | null): L {
   return site ? site.name : { th: id, en: id };
 }
 
+/** `เที่ยว 3 · Trip 3` — the trip chip / row-selector label. */
+const tripSelectLabel = (n: number): string => pair(tripLabel(n));
+
 function tripRow(trip: ReportTrip, sites: readonly Site[]): string {
-  return `<tr>
-<td class="num">${trip.n}</td>
+  return `<tr data-trip="${trip.n}">
+<td class="num"><button type="button" class="rowlink" data-select="trip-${trip.n}" title="${escapeHtml(tripSelectLabel(trip.n))}">${trip.n}</button></td>
 <td>${escapeHtml(trip.start)}</td>
 <td>${escapeHtml(trip.end)}</td>
 <td class="num">${trip.minutes}</td>
@@ -54,12 +57,12 @@ function tripRow(trip: ReportTrip, sites: readonly Site[]): string {
 </tr>`;
 }
 
-function stopRow(stop: ReportStop, sites: readonly Site[]): string {
+function stopRow(stop: ReportStop, sites: readonly Site[], index: number): string {
   const virtualLabel =
     stop.virtual === "track-start" ? LABELS.trackStart : stop.virtual === "track-end" ? LABELS.trackEnd : null;
   const place = virtualLabel ?? siteLabel(sites, stop.site);
-  return `<tr${stop.virtual ? ' class="virtual"' : ""}>
-<td>${escapeHtml(stop.arrive)}</td>
+  return `<tr data-stop="${index}"${stop.virtual ? ' class="virtual"' : ""}>
+<td><button type="button" class="rowlink" data-select="stop-${index}" title="${escapeHtml(pair(LABELS.showStopOnMap))}">${escapeHtml(stop.arrive)}</button></td>
 <td>${escapeHtml(stop.depart)}</td>
 <td class="num">${stop.minutes}</td>
 <td><a href="${escapeHtml(stop.mapUrl)}" rel="noreferrer noopener" target="_blank">${escapeHtml(place.th)}</a></td>
@@ -70,13 +73,38 @@ function stopRow(stop: ReportStop, sites: readonly Site[]): string {
 function findingsHtml(report: DayReport): string {
   if (report.findings.length === 0) return `<p class="none">${escapeHtml(pair(LABELS.noFindings))}</p>`;
   const items = report.findings.map((f) => {
-    const link =
+    const mapLink =
       f.kind === "unknown-stop"
         ? ` <a href="${escapeHtml(f.mapUrl)}" rel="noreferrer noopener" target="_blank">${escapeHtml(pair(LABELS.openInMaps))}</a>`
         : "";
-    return `<li class="${escapeHtml(f.kind)}"><span class="th">${escapeHtml(f.text.th)}</span><span class="en">${escapeHtml(f.text.en)}</span>${link}</li>`;
+    const selectAttr =
+      f.kind === "unknown-stop" ? ` data-stop="${f.stopIndex}"` : f.kind === "detour" ? ` data-trips="${f.trips.join(",")}"` : "";
+    const selectButton =
+      f.kind === "unknown-stop"
+        ? ` <button type="button" class="rowlink" data-select="stop-${f.stopIndex}">${escapeHtml(pair(LABELS.showStopOnMap))}</button>`
+        : f.kind === "detour"
+          ? ` <button type="button" class="rowlink" data-select="trip-${f.trips.join("-")}">${escapeHtml(pair(LABELS.showTripOnMap))}</button>`
+          : "";
+    return `<li class="${escapeHtml(f.kind)}"${selectAttr}><span class="th">${escapeHtml(f.text.th)}</span><span class="en">${escapeHtml(f.text.en)}</span>${mapLink}${selectButton}</li>`;
   });
   return `<ul class="findings">${items.join("")}</ul>`;
+}
+
+/**
+ * The filter chip row (feature: filter the day map by trip or stop). One chip
+ * per trip plus "All day" first and always present — even a day with zero
+ * trips still renders the one chip, so the row is never empty.
+ */
+function chipsHtml(report: DayReport, sites: readonly Site[]): string {
+  const trips = report.trips ?? [];
+  const allChip = `<button type="button" class="chip active" data-select="all" aria-pressed="true">${escapeHtml(pair(LABELS.allDayChip))}</button>`;
+  const tripChips = trips.map((trip) => {
+    const from = siteLabel(sites, trip.from).th;
+    const to = siteLabel(sites, trip.to).th;
+    const label = `${tripSelectLabel(trip.n)} (${from} → ${to})`;
+    return `<button type="button" class="chip" data-select="trip-${trip.n}" aria-pressed="false">${escapeHtml(label)}</button>`;
+  });
+  return `<div class="chips" id="trip-chips" role="group" aria-label="${escapeHtml(pair(LABELS.mapHeading))}">${[allChip, ...tripChips].join("")}</div>`;
 }
 
 function deviceHtml(report: DayReport): string {
@@ -175,11 +203,12 @@ ${
     ? `<p class="none">${escapeHtml(pair(LABELS.noData))}</p>`
     : `<div class="scroll"><table>
 <thead><tr><th>${escapeHtml(LABELS.colArrive.th)}</th><th>${escapeHtml(LABELS.colDepart.th)}</th><th class="num">${escapeHtml(LABELS.colMinutes.th)}</th><th>${escapeHtml(LABELS.colPlace.th)}</th><th class="num">${escapeHtml(LABELS.colEngineOn.th)}</th></tr></thead>
-<tbody>${stopRows.map((st) => stopRow(st, sites)).join("")}</tbody></table></div>`
+<tbody>${stopRows.map((st, i) => stopRow(st, sites, i)).join("")}</tbody></table></div>`
 }
 </section>
 <section>
 <h2>${pairHtml(LABELS.mapHeading)}</h2>
+${chipsHtml(report, sites)}
 <div id="map" data-ymd="${escapeHtml(report.date)}"></div>
 </section>`;
 
@@ -234,6 +263,16 @@ export const MAP_ESC_FN = `function esc(v) {
  * The whole client. ES5-flavoured on purpose (reception runs old Android
  * WebViews), no template literals, and every failure is silent: a map that does
  * not draw must never blank the report above it.
+ *
+ * Feature: filter the day map by trip or stop. The day's path (`/api/day`'s
+ * `path`) is sliced into one polyline per trip using the trip's own
+ * `startAt`/`endAt` (§9, additive) plus one dim "rest of day" polyline per gap
+ * between trips (parked time). Selecting a trip bolds its line(s) and dims the
+ * rest; selecting "all" restores every trip to its base style. A stop selection
+ * is independent of trip highlighting — it only flies the map to that marker and
+ * opens its popup. The selection is mirrored to `location.hash` with
+ * `history.replaceState` (never `pushState` — a filter click is not a new page),
+ * and a hash present on load is applied once the fetch resolves.
  */
 const MAP_SCRIPT = `
 (function () {
@@ -254,11 +293,13 @@ const MAP_SCRIPT = `
 
     ${MAP_ESC_FN}
 
-    // Bounds are computed from plain lat/lon math (L.LatLng#toBounds), never by
-    // asking an added layer for its own bounds: Leaflet 1.9 defers a layer's
-    // actual add until the map has a view, so a circle's bounds getter throws on
-    // an unprojected layer before that first view exists. Compute the view
-    // first, THEN add layers.
+    // Bounds are computed from plain lat/lon math (L.LatLng#toBounds /
+    // L.latLngBounds over raw coordinate arrays), never by asking an added layer
+    // for its own bounds: Leaflet 1.9 defers a layer's actual add until the map
+    // has a view, so a layer's bounds getter throws on an unprojected layer
+    // before that first view exists. Compute the view first, THEN add layers —
+    // and keep every selection's bounds built from the coordinate arrays this
+    // script already holds, not from L.Polyline#getBounds().
     function siteBounds(list) {
       var b = L.latLngBounds([]);
       for (var i = 0; i < list.length; i++) {
@@ -268,19 +309,36 @@ const MAP_SCRIPT = `
       return b;
     }
 
+    function coordBounds(coords) {
+      var b = L.latLngBounds([]);
+      for (var i = 0; i < coords.length; i++) b.extend(coords[i]);
+      return b;
+    }
+
+    function mergeStyle(base, over) {
+      var out = {};
+      var k;
+      for (k in base) if (Object.prototype.hasOwnProperty.call(base, k)) out[k] = base[k];
+      for (k in over) if (Object.prototype.hasOwnProperty.call(over, k)) out[k] = over[k];
+      return out;
+    }
+
     var initialBounds = siteBounds(sites);
     if (initialBounds.isValid()) map.fitBounds(initialBounds.pad(0.25));
     else map.setView([9.13, 99.34], 12);
 
-    var layers = [];
     for (var i = 0; i < sites.length; i++) {
       var s = sites[i];
       var circle = L.circle([s.lat, s.lon], {
         radius: s.radiusM, color: '#7a0000', weight: 1, fillColor: '#8b0000', fillOpacity: 0.06
       }).addTo(map);
       circle.bindPopup(esc(s.name));
-      layers.push(circle);
     }
+
+    var TRIP_BASE = { color: '#8b0000', weight: 4, opacity: 0.85 };
+    var TRIP_DIM = { opacity: 0.25, weight: 3 };
+    var TRIP_ON = { opacity: 1, weight: 6 };
+    var REST_STYLE = { color: '#8b0000', weight: 2, opacity: 0.3, dashArray: '2 6' };
 
     fetch('/api/day/' + encodeURIComponent(el.getAttribute('data-ymd')), {
       headers: { accept: 'application/json' },
@@ -289,17 +347,51 @@ const MAP_SCRIPT = `
       return r.ok ? r.json() : null;
     }).then(function (d) {
       if (!d) return;
-      var finalBounds = siteBounds(sites);
-      var raw = d.path || [];
-      var line = [];
-      for (var i = 0; i < raw.length; i++) {
-        line.push([raw[i][0], raw[i][1]]);
-        finalBounds.extend([raw[i][0], raw[i][1]]);
-      }
-      if (line.length > 1) {
-        L.polyline(line, { color: '#8b0000', weight: 4, opacity: 0.85 }).addTo(map);
-      }
+      var path = d.path || [];
+      var trips = d.trips || [];
       var stops = d.stops || [];
+
+      function tripAt(t) {
+        for (var i = 0; i < trips.length; i++) {
+          if (t >= trips[i].startAt && t <= trips[i].endAt) return trips[i].n;
+        }
+        return null;
+      }
+
+      // One segment per contiguous run of points belonging to the same trip (or
+      // to no trip at all — parked/rest time), in path order.
+      var segments = [];
+      var current = null;
+      for (var i = 0; i < path.length; i++) {
+        var p = path[i];
+        var n = tripAt(p[2]);
+        if (!current || current.n !== n) {
+          current = { n: n, coords: [] };
+          segments.push(current);
+        }
+        current.coords.push([p[0], p[1]]);
+      }
+
+      var tripLayers = {};
+      var tripCoords = {};
+      var dayCoords = [];
+      for (var i = 0; i < path.length; i++) dayCoords.push([path[i][0], path[i][1]]);
+
+      for (var i = 0; i < segments.length; i++) {
+        var seg = segments[i];
+        if (seg.coords.length < 2) continue;
+        if (seg.n === null) {
+          L.polyline(seg.coords, REST_STYLE).addTo(map);
+        } else {
+          var line = L.polyline(seg.coords, TRIP_BASE).addTo(map);
+          if (!tripLayers[seg.n]) { tripLayers[seg.n] = []; tripCoords[seg.n] = []; }
+          tripLayers[seg.n].push(line);
+          tripCoords[seg.n] = tripCoords[seg.n].concat(seg.coords);
+        }
+      }
+
+      var stopMarkers = [];
+      var stopCoords = [];
       for (var j = 0; j < stops.length; j++) {
         var st = stops[j];
         var known = st.site != null;
@@ -311,9 +403,120 @@ const MAP_SCRIPT = `
           '<b>' + esc(known ? st.site : txt.unknown) + '</b><br>' +
           esc(st.arrive) + '–' + esc(st.depart) + ' (' + esc(st.minutes) + ' ' + esc(txt.minutes) + ')'
         );
-        finalBounds.extend([st.lat, st.lon]);
+        stopMarkers.push(marker);
+        stopCoords.push([st.lat, st.lon]);
       }
-      if (finalBounds.isValid()) map.fitBounds(finalBounds.pad(0.15));
+
+      var dayBounds = siteBounds(sites);
+      dayBounds.extend(coordBounds(dayCoords));
+      dayBounds.extend(coordBounds(stopCoords));
+      if (dayBounds.isValid()) map.fitBounds(dayBounds.pad(0.15));
+
+      // ── selection (chips, table rows, findings — filter the map by trip/stop) ──
+
+      function setChipActive(token) {
+        var chips = document.querySelectorAll('.chip');
+        for (var i = 0; i < chips.length; i++) {
+          var on = chips[i].getAttribute('data-select') === token;
+          if (on) chips[i].className = 'chip active';
+          else chips[i].className = 'chip';
+          chips[i].setAttribute('aria-pressed', on ? 'true' : 'false');
+        }
+      }
+
+      function showAllTrips() {
+        for (var n in tripLayers) {
+          if (!Object.prototype.hasOwnProperty.call(tripLayers, n)) continue;
+          for (var k = 0; k < tripLayers[n].length; k++) tripLayers[n][k].setStyle(TRIP_BASE);
+        }
+        setChipActive('all');
+        if (dayBounds.isValid()) map.fitBounds(dayBounds.pad(0.15));
+      }
+
+      function highlightTrips(ns) {
+        var bounds = L.latLngBounds([]);
+        for (var n in tripLayers) {
+          if (!Object.prototype.hasOwnProperty.call(tripLayers, n)) continue;
+          var on = ns.indexOf(Number(n)) >= 0;
+          var style = mergeStyle(TRIP_BASE, on ? TRIP_ON : TRIP_DIM);
+          for (var k = 0; k < tripLayers[n].length; k++) tripLayers[n][k].setStyle(style);
+          if (on) bounds.extend(coordBounds(tripCoords[n] || []));
+        }
+        setChipActive('trip-' + ns.join('-'));
+        if (bounds.isValid()) map.fitBounds(bounds.pad(0.25));
+      }
+
+      function focusStop(index) {
+        var marker = stopMarkers[index];
+        if (!marker) return;
+        map.setView(marker.getLatLng(), Math.max(map.getZoom(), 17));
+        marker.openPopup();
+      }
+
+      /** Applies a token ('all' | 'trip-N[-M...]' | 'stop-N'); returns the canonical form applied. */
+      function applySelection(token) {
+        if (!token || token === 'all') { showAllTrips(); return 'all'; }
+        var stopMatch = /^stop-(\\d+)$/.exec(token);
+        if (stopMatch) { focusStop(parseInt(stopMatch[1], 10)); return token; }
+        var tripMatch = /^trip-([0-9-]+)$/.exec(token);
+        if (tripMatch) {
+          var parts = tripMatch[1].split('-');
+          var ns = [];
+          for (var i = 0; i < parts.length; i++) {
+            var num = parseInt(parts[i], 10);
+            if (!isNaN(num)) ns.push(num);
+          }
+          if (ns.length === 0) { showAllTrips(); return 'all'; }
+          highlightTrips(ns);
+          return 'trip-' + ns.join('-');
+        }
+        showAllTrips();
+        return 'all';
+      }
+
+      function setHash(token) {
+        var target = '#' + token;
+        if (window.location.hash === target) return;
+        try { history.replaceState(null, '', target); } catch (e) { /* ignore */ }
+      }
+
+      function selectAndMirror(token) {
+        setHash(applySelection(token));
+      }
+
+      var selectors = document.querySelectorAll('[data-select]');
+      for (var i = 0; i < selectors.length; i++) {
+        (function (node) {
+          node.addEventListener('click', function (e) {
+            e.preventDefault();
+            selectAndMirror(node.getAttribute('data-select'));
+          });
+        })(selectors[i]);
+      }
+      var tripRows = document.querySelectorAll('tr[data-trip]');
+      for (var i = 0; i < tripRows.length; i++) {
+        (function (row) {
+          row.addEventListener('click', function () {
+            selectAndMirror('trip-' + row.getAttribute('data-trip'));
+          });
+        })(tripRows[i]);
+      }
+      var stopRows = document.querySelectorAll('tr[data-stop]');
+      for (var i = 0; i < stopRows.length; i++) {
+        (function (row) {
+          row.addEventListener('click', function () {
+            selectAndMirror('stop-' + row.getAttribute('data-stop'));
+          });
+        })(stopRows[i]);
+      }
+
+      var initialToken = (window.location.hash || '').replace(/^#/, '');
+      if (initialToken) applySelection(initialToken);
+      else showAllTrips();
+
+      window.addEventListener('hashchange', function () {
+        applySelection((window.location.hash || '').replace(/^#/, ''));
+      });
     }).catch(function (e) { console.error('map:', e); });
   } catch (e) { console.error('map:', e); }
 })();

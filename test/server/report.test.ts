@@ -2,10 +2,12 @@
 
 import { describe, expect, test } from "bun:test";
 import type { DaySummary, Point } from "../../src/domain/types.ts";
+import { pointFromRow } from "../../src/domain/sinotrackRow.ts";
 import { summarizeDay } from "../../src/domain/summary.ts";
 import { unknownStopText, detourText, outsideHoursText } from "../../src/shared/labels.ts";
 import { loadRules, loadSites } from "../../src/server/siteConfig.ts";
 import { bangkokStamp, buildDayReport, hhmm, km1, minutesOf, ratio2, summaryOnly } from "../../src/server/report.ts";
+import rawRows from "../fixtures/2026-09-05.raw.json";
 
 const TEID = "1000000001";
 const GENERATED_AT = 1788595367;
@@ -159,6 +161,60 @@ describe("the map path (§9)", () => {
 
     expect(device.lastSeenAt).toBe(T0 + 120);
     expect(device.voltage).toBe(12.7);
+  });
+});
+
+describe("the day-page filter fields (additive, §9)", () => {
+  const RAW: Record<string, string>[] = rawRows as unknown as Record<string, string>[];
+  const POINTS: Point[] = RAW.map(pointFromRow).filter((p): p is Point => p !== null);
+  const SITES = loadSites();
+  const RULES = loadRules();
+  const summary = summarizeDay("2026-09-05", POINTS, SITES, RULES);
+  const report = build(summary, { points: POINTS });
+
+  test("every trip carries startAt/endAt matching the domain trip, alongside the existing HH:MM pair", () => {
+    expect(report.trips).toHaveLength(summary.trips.length);
+    report.trips!.forEach((trip, i) => {
+      const domainTrip = summary.trips[i]!;
+      expect(trip.startAt).toBe(domainTrip.start);
+      expect(trip.endAt).toBe(domainTrip.end);
+      expect(trip.start).toBe(hhmm(domainTrip.start));
+      expect(trip.end).toBe(hhmm(domainTrip.end));
+    });
+  });
+
+  test("every stop carries arriveAt/departAt matching the domain stop", () => {
+    expect(report.stops).toHaveLength(summary.stops.length);
+    report.stops!.forEach((stop, i) => {
+      const domainStop = summary.stops[i]!;
+      expect(stop.arriveAt).toBe(domainStop.arrive);
+      expect(stop.departAt).toBe(domainStop.depart);
+    });
+  });
+
+  test("the fixture's unknown-stop finding points at stop index 3 (14:18–14:22 at HF Ville)", () => {
+    const unknown = report.findings.find((f) => f.kind === "unknown-stop");
+    expect(unknown).toBeDefined();
+    expect(unknown!.kind === "unknown-stop" && unknown!.stopIndex).toBe(3);
+    const stop = report.stops![3]!;
+    expect(stop.arrive).toBe("14:18");
+    expect(stop.depart).toBe("14:22");
+    expect(stop.site).toBeNull();
+  });
+
+  test("an outside-hours finding carries startAt/endAt", () => {
+    const nightRules = { ...RULES, schedule: { start: "00:00", end: "00:00" } }; // never inside → every move counts
+    const nightSummary = summarizeDay("2026-09-05", POINTS, SITES, nightRules);
+    const nightReport = build(nightSummary, { points: POINTS, rules: nightRules });
+    const outside = nightReport.findings.find((f) => f.kind === "outside-hours");
+    expect(outside).toBeDefined();
+    if (outside && outside.kind === "outside-hours") {
+      // startAt/endAt are the raw epochs `start`/`end` were formatted from — the
+      // additive fields must round-trip through the same clock, not a new one.
+      expect(hhmm(outside.startAt)).toBe(outside.start);
+      expect(hhmm(outside.endAt)).toBe(outside.end);
+      expect(outside.endAt).toBeGreaterThanOrEqual(outside.startAt);
+    }
   });
 });
 

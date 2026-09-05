@@ -102,6 +102,9 @@ export interface ReportTrip {
   n: number;
   start: string;
   end: string;
+  /** Epoch seconds, additive (docs/CONTRACTS.md §9) — what the day-page map filters on. */
+  startAt: number;
+  endAt: number;
   minutes: number;
   km: number;
   maxKmh: number;
@@ -114,6 +117,9 @@ export interface ReportTrip {
 export interface ReportStop {
   arrive: string;
   depart: string;
+  /** Epoch seconds, additive (docs/CONTRACTS.md §9) — what the day-page map filters on. */
+  arriveAt: number;
+  departAt: number;
   minutes: number;
   site: string | null;
   lat: number;
@@ -135,7 +141,16 @@ export interface ReportLeg {
 }
 
 export type ReportFinding =
-  | { kind: "unknown-stop"; text: L; mapUrl: string; minutes: number; start: string; end: string }
+  | {
+      kind: "unknown-stop";
+      text: L;
+      mapUrl: string;
+      minutes: number;
+      start: string;
+      end: string;
+      /** Index into `DayReport.stops`, additive (§9) — what the day-page map selects. */
+      stopIndex: number;
+    }
   | {
       kind: "detour";
       text: L;
@@ -146,7 +161,16 @@ export type ReportFinding =
       referenceKm: number;
       ratio: number;
     }
-  | { kind: "outside-hours"; text: L; start: string; end: string; km: number };
+  | {
+      kind: "outside-hours";
+      text: L;
+      start: string;
+      end: string;
+      km: number;
+      /** Epoch seconds, additive (§9). */
+      startAt: number;
+      endAt: number;
+    };
 
 export interface ReportDataQuality {
   lastPollAt: number | null;
@@ -190,6 +214,8 @@ function toTrip(trip: Trip): ReportTrip {
     n: trip.n,
     start: hhmm(trip.start),
     end: hhmm(trip.end),
+    startAt: trip.start,
+    endAt: trip.end,
     minutes: minutesOf(trip.end - trip.start),
     km: km1(trip.km),
     maxKmh: Math.round(trip.maxKmh),
@@ -204,6 +230,8 @@ function toStop(stop: Stop): ReportStop {
   const out: ReportStop = {
     arrive: hhmm(stop.arrive),
     depart: hhmm(stop.depart),
+    arriveAt: stop.arrive,
+    departAt: stop.depart,
     minutes: minutesOf(stop.depart - stop.arrive),
     site: stop.siteId,
     lat: coord5(stop.lat),
@@ -228,7 +256,17 @@ function toLeg(leg: Leg, rules: Rules): ReportLeg {
   };
 }
 
-function toFinding(finding: Finding, sites: readonly Site[]): ReportFinding {
+/**
+ * The finding's stop, located back in `summary.stops` by (arrive, depart) — the
+ * exact pair `unknownStops()` in `src/domain/audit.ts` copied off the stop it
+ * fired on, and unique because stops are chronological and non-overlapping.
+ * `-1` (never expected to fire) is friendlier to a JSON consumer than a throw.
+ */
+function findStopIndex(stops: readonly Stop[], arrive: number, depart: number): number {
+  return stops.findIndex((s) => s.arrive === arrive && s.depart === depart);
+}
+
+function toFinding(finding: Finding, sites: readonly Site[], stops: readonly Stop[]): ReportFinding {
   if (finding.kind === "unknown-stop") {
     const minutes = minutesOf(finding.durationS);
     const start = hhmm(finding.arrive);
@@ -240,6 +278,7 @@ function toFinding(finding: Finding, sites: readonly Site[]): ReportFinding {
       minutes,
       start,
       end,
+      stopIndex: findStopIndex(stops, finding.arrive, finding.depart),
     };
   }
   if (finding.kind === "detour") {
@@ -266,7 +305,15 @@ function toFinding(finding: Finding, sites: readonly Site[]): ReportFinding {
   const start = hhmm(finding.start);
   const end = hhmm(finding.end);
   const km = km1(finding.km);
-  return { kind: "outside-hours", text: outsideHoursText(start, end, km), start, end, km };
+  return {
+    kind: "outside-hours",
+    text: outsideHoursText(start, end, km),
+    start,
+    end,
+    km,
+    startAt: finding.start,
+    endAt: finding.end,
+  };
 }
 
 /**
@@ -374,7 +421,7 @@ export function buildDayReport(args: BuildArgs): DayReport {
     trips: summary.trips.map(toTrip),
     stops: summary.stops.map(toStop),
     legs: summary.legs.map((leg) => toLeg(leg, rules)),
-    findings: summary.findings.map((f) => toFinding(f, sites)),
+    findings: summary.findings.map((f) => toFinding(f, sites, summary.stops)),
     path: points.map((p): PathPoint => [coord5(p.lat), coord5(p.lon), p.t]),
     dataQuality: toDataQuality(args.poll, summary, args.pollerConfigured),
   };
