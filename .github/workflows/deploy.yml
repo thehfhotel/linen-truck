@@ -1,0 +1,256 @@
+name: CI & Deploy
+
+# Shape copied from ~/HF/ev-charging-hotel (the other app on this box): GitHub
+# Actions builds the image, pushes it to GHCR, then SSHes through the HF Ville
+# box's Cloudflare tunnel with `cloudflared access ssh` and a service token to a
+# forced-command home-dir shim. Nothing here knows an address: the SSH target,
+# the host key and the Access service token are all secrets, and the real
+# topology lives in the private ops note (docs/CONTRACTS.md §0/§10/§13).
+#
+# THIS REPOSITORY IS PUBLIC AND SO ARE THESE LOGS. Rules, non-negotiable:
+#   * never `echo`/`cat`/`printf` a rendered env value — only counts (`wc -l`);
+#   * never `set -x` in a step that touches a secret;
+#   * every real value reaches a step through `env:` from `secrets.*`, never
+#     interpolated into a `run:` body where it would land in the command trace;
+#   * no `pull_request_target`, and the deploy job never runs on `pull_request`,
+#     so a fork PR can never reach a secret.
+#
+# CI is the gate: broken code cannot reach the box because deploy-hfville needs
+# ci. The deploy is not done until /healthz on the box echoes the deployed sha —
+# the shim asserts that, and scripts/verify-live.sh asserts it again from here
+# (docs/runbooks/deploy-and-rollback.md).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      rollback_sha:
+        description: >-
+          Full 40-hex commit sha of an ALREADY-BUILT image to redeploy. Leave
+          empty for a normal deploy of this branch. When set, the build is
+          skipped and the box pulls ghcr.io/thehfhotel/linen-truck:<that sha>.
+        required: false
+        default: ""
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/thehfhotel/linen-truck
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5.0.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3"
+
+      - run: bun install --frozen-lockfile
+
+      - name: Public-repo secret scan
+        run: bash scripts/check-no-secrets.sh
+
+      - name: Shell scripts parse
+        run: |
+          set -euo pipefail
+          find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+          echo "all shell scripts parse"
+
+      - run: bun run typecheck
+      - run: bun test
+
+  deploy-hfville:
+    name: Deploy to the HF Ville box
+    runs-on: ubuntu-latest
+    needs: [ci]
+    # Stays skipped (not red) until the box shim, the deploy key and the secrets
+    # all exist: flip the TRUCK_DEPLOY_ENABLED repository variable to "1".
+    if: vars.TRUCK_DEPLOY_ENABLED == '1'
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: deploy-hfville-linen-truck
+      cancel-in-progress: false
+    env:
+      # Empty for a push; a sha for a rollback dispatch. Read through the env
+      # context so the `if:` below is reliable on both event types.
+      ROLLBACK_SHA: ${{ github.event.inputs.rollback_sha || '' }}
+    steps:
+      # A rollback must ship the compose file of the sha being redeployed, not
+      # main's current one, so the checkout follows the rollback sha.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5.0.0
+        with:
+          ref: ${{ github.event.inputs.rollback_sha || github.sha }}
+
+      - name: Resolve the sha to deploy
+        # DEPLOY_SHA is what the box will be told to run AND what its /healthz
+        # must echo back. For a rollback that is the older sha, whose image is
+        # already in GHCR with its own GIT_SHA baked in.
+        run: |
+          set -euo pipefail
+          sha="${ROLLBACK_SHA:-}"
+          if [ -z "$sha" ]; then
+            sha="$GITHUB_SHA"
+            echo "mode=build-and-deploy"
+          else
+            echo "mode=rollback (no build)"
+          fi
+          case "$sha" in
+            *[!0-9a-f]*) echo "FATAL: sha must be lowercase hex" >&2; exit 1 ;;
+          esac
+          [ "${#sha}" -eq 40 ] || { echo "FATAL: sha must be 40 hex characters" >&2; exit 1; }
+          echo "DEPLOY_SHA=$sha" >> "$GITHUB_ENV"
+          echo "deploying sha $sha"
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+        if: env.ROLLBACK_SHA == ''
+
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        if: env.ROLLBACK_SHA == ''
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        if: env.ROLLBACK_SHA == ''
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        if: env.ROLLBACK_SHA == ''
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=registry,ref=ghcr.io/thehfhotel/linen-truck:buildcache
+          cache-to: type=registry,ref=ghcr.io/thehfhotel/linen-truck:buildcache,mode=max
+
+      - name: Render deploy env payload
+        # Frozen env names only (docs/CONTRACTS.md §1/§11). Empty optionals are
+        # dropped so the container keeps the compose defaults instead of being
+        # handed a blank string. NOTHING is printed but the line count — this
+        # log is world-readable.
+        env:
+          CF_ACCESS_AUD:      ${{ secrets.TRUCK_CF_ACCESS_AUD }}
+          FEED_TOKEN:         ${{ secrets.TRUCK_FEED_TOKEN }}
+          SINOTRACK_USER:     ${{ secrets.TRUCK_SINOTRACK_USER }}
+          SINOTRACK_PASSWORD: ${{ secrets.TRUCK_SINOTRACK_PASSWORD }}
+          SINOTRACK_SERVER:   ${{ secrets.TRUCK_SINOTRACK_SERVER }}
+          PUBLIC_URL:         ${{ secrets.TRUCK_PUBLIC_URL }}
+        run: |
+          set -euo pipefail
+          umask 077
+          : > deploy.env
+          for k in CF_ACCESS_AUD FEED_TOKEN SINOTRACK_USER SINOTRACK_PASSWORD \
+                   SINOTRACK_SERVER PUBLIC_URL; do
+            v="${!k:-}"
+            [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> deploy.env
+          done
+          printf 'TRUCK_SHA=%s\n' "$DEPLOY_SHA" >> deploy.env
+          wc -l deploy.env
+
+      - name: Gate — refuse dev-bypass vars in the deploy payload
+        # ALLOW_DEV_AUTH replaces the Cloudflare Access JWT with a plain header.
+        # It is legal in docker-compose.yml (local only) and nowhere else. This
+        # step prints the offending KEY, never a value.
+        run: |
+          set -euo pipefail
+          if cut -d= -f1 deploy.env | grep -nE '^(ALLOW_DEV_AUTH|DEV_[A-Z_]+)$'; then
+            echo "FATAL: dev-bypass variable in the deploy env payload" >&2
+            exit 1
+          fi
+          echo "gate clean"
+
+      - name: Install cloudflared (pinned + verified)
+        # The box has no tailnet deploy identity we control; its Cloudflare
+        # tunnel already publishes an SSH Access app, and the truck-ci service
+        # token is scoped to it. Version + checksum mirrored from evcharge.
+        env:
+          CLOUDFLARED_VERSION: "2026.7.3"
+          # The upstream release checksum is 64 hex characters and therefore
+          # looks exactly like an Access audience to the secret scanner:
+          CLOUDFLARED_SHA256: "9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4972098d19f770f17" # secret-scan-ok: published cloudflared release checksum
+        run: |
+          set -euo pipefail
+          url="https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64"
+          curl -fsSL --retry 3 --retry-connrefused "$url" -o /tmp/cloudflared
+          echo "${CLOUDFLARED_SHA256}  /tmp/cloudflared" | sha256sum -c -
+          sudo install -m 755 /tmp/cloudflared /usr/local/bin/cloudflared
+
+      - name: Install SSH key + known_hosts
+        # TRUCK_DEPLOY_SSH_KEY is a keypair minted for THIS repo only; its
+        # authorized_keys entry on the box forces ~/deploy-truck/run-deploy.sh
+        # and nothing else. HFVILLE_HOST_KEY identifies the host (shared with
+        # the other app on the box — host identity is shared, deploy authority
+        # is not). StrictHostKeyChecking stays on: this file is the only trust
+        # anchor for the hop.
+        env:
+          SSH_KEY:  ${{ secrets.TRUCK_DEPLOY_SSH_KEY }}
+          HOST_KEY: ${{ secrets.HFVILLE_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY"  > ~/.ssh/deploy_key  && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts
+          test -s ~/.ssh/deploy_key
+          test -s ~/.ssh/known_hosts
+
+      - name: Deploy over SSH to the HF Ville box
+        # Payload shape the shim expects (scripts/deploy/run-deploy.sh):
+        #   { commit_sha, deploy_payload_b64 (tar.gz), ghcr: {...}, env: {...} }
+        # The tarball ships docker-compose.hfville.yml renamed docker-compose.yml,
+        # the canonical name the shim's `docker compose` uses. GITHUB_TOKEN has
+        # packages:read for the pull and dies with the run, so no long-lived
+        # credential is left on the box.
+        env:
+          GHCR_USER:  ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SSH_TARGET: ${{ secrets.HFVILLE_SSH_TARGET }}
+          CF_ID:      ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_SECRET:  ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          mkdir -p payload
+          cp docker-compose.hfville.yml payload/docker-compose.yml
+          tar -C payload -czf /tmp/deploy.tar.gz docker-compose.yml
+
+          env_json=$(jq -Rn '[inputs | select(length > 0) | capture("(?<key>[^=]+)=(?<value>.*)")] | from_entries' < deploy.env)
+
+          jq -n \
+            --arg commit_sha         "$DEPLOY_SHA" \
+            --arg deploy_payload_b64 "$(base64 -w0 < /tmp/deploy.tar.gz)" \
+            --arg ghcr_user          "$GHCR_USER" \
+            --arg ghcr_token         "$GHCR_TOKEN" \
+            --argjson env            "$env_json" \
+            '{
+              commit_sha: $commit_sha,
+              deploy_payload_b64: $deploy_payload_b64,
+              ghcr: { user: $ghcr_user, token: $ghcr_token },
+              env: $env
+            }' \
+          | ssh -i ~/.ssh/deploy_key \
+              -o "ProxyCommand=cloudflared access ssh --hostname %h --service-token-id $CF_ID --service-token-secret $CF_SECRET" \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              -o IdentitiesOnly=yes \
+              -o BatchMode=yes \
+              "$SSH_TARGET"
+
+      - name: Scrub the rendered env
+        if: always()
+        run: rm -f deploy.env /tmp/deploy.tar.gz

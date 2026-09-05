@@ -1,0 +1,35 @@
+# Everything the runtime image does not need. Keep this tight: the image is
+# published to a PUBLIC GHCR repo, so anything copied in is world-readable.
+node_modules
+data
+dist
+.git
+.github
+.vscode
+.idea
+*.log
+
+# Never bake an environment file into the image — production env arrives as the
+# deploy payload's .env, mounted by compose at run time (docs/CONTRACTS.md §11).
+.env
+.env.*
+!.env.example
+deploy.env
+payload
+*.pem
+*.key
+
+# Ops scripts run from a checkout (the Mac) or from the box, never inside the
+# container. Only scripts/import.ts and scripts/backup.ts are meant to ship.
+scripts/deploy
+scripts/hfville
+scripts/owner
+scripts/verify-live.sh
+scripts/check-no-secrets.sh
+
+README.md
+CLAUDE.md
+CONTEXT.md
+docs
+test
+.DS_Store

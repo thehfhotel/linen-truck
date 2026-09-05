@@ -1,0 +1,47 @@
+# Vulnerability, secret and misconfiguration scanning.
+# CodeQL needs GitHub Advanced Security, which this org does not have — Trivy is
+# the estate precedent (loyalty-app, ev-charging-hotel) and runs free anywhere.
+#
+# The `secret` scanner is the second line of defence behind
+# scripts/check-no-secrets.sh (docs/CONTRACTS.md §13): that script knows THIS
+# estate's forbidden identifiers, Trivy knows the generic credential shapes.
+# Every action is SHA-pinned — a floating tag on a public repo's workflow is a
+# supply-chain hole.
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 23 * * 0" # weekly, Monday 06:00 Asia/Bangkok
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: Trivy scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5.0.0
+
+      - name: Vulnerabilities (lockfile) and secrets
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+          skip-dirs: node_modules,data
+
+      - name: IaC misconfiguration (Dockerfile, compose, workflows)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          skip-dirs: node_modules,data

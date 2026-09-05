@@ -1,0 +1,23 @@
+node_modules/
+dist/
+data/
+.env
+.env.*
+!.env.example
+
+# Rendered by CI (deploy.yml) and by nothing else — it holds every production
+# secret in plaintext and must never be committed (docs/CONTRACTS.md §13).
+deploy.env
+payload/
+
+# Deploy keys and any other private key material.
+*.pem
+*.key
+
+*.log
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+.DS_Store
+.claude/

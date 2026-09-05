@@ -1,0 +1,41 @@
+name: CI
+
+# The gate. Runs on every push and every pull request, including fork PRs — so
+# it must never need a secret, and it never does: the deploy job (deploy.yml)
+# is the only place secrets are read, and it runs on push to main only.
+#
+# check-no-secrets runs BEFORE typecheck on purpose: this repository is PUBLIC
+# and its Actions logs are world-readable, so a leaked identifier is a worse
+# failure than a type error and should be the first thing that goes red
+# (docs/CONTRACTS.md §13).
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5.0.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3"
+
+      - run: bun install --frozen-lockfile
+
+      - name: Public-repo secret scan
+        run: bash scripts/check-no-secrets.sh
+
+      - name: Shell scripts parse
+        run: |
+          set -euo pipefail
+          find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+          echo "all shell scripts parse"
+
+      - run: bun run typecheck
+      - run: bun test

@@ -1,0 +1,4 @@
+[
+  { "id": "hf",      "name": { "th": "โรงแรม HF",  "en": "HF Hotel" }, "lat": 9.1442868, "lon": 99.3245632, "radiusM": 250 },
+  { "id": "hfville", "name": { "th": "HF Ville",   "en": "HF Ville" }, "lat": 9.1213396, "lon": 99.3516676, "radiusM": 250 }
+]

@@ -1,0 +1,75 @@
+# Production compose for the HF Ville box (docs/CONTRACTS.md §11).
+#
+# CI ships this file INSIDE the deploy tarball, renamed to docker-compose.yml —
+# that is the canonical name the box shim's `docker compose` invocations use
+# (scripts/deploy/run-deploy.sh). Never run this file by hand from a checkout.
+#
+# Every value below is either a public constant or a ${VAR} read from the .env
+# the shim writes (mode 0600, next to this file) out of the deploy payload. No
+# secret is ever baked into this file or into the image.
+# Explicit project name: the shim runs `compose up --remove-orphans` from a
+# directory literally called `app`, and the derived project name `app` could
+# collide with another stack on the box and delete its containers as orphans.
+name: truck
+
+services:
+  truck:
+    image: ghcr.io/thehfhotel/linen-truck:${TRUCK_SHA:-latest}
+    container_name: truck
+    restart: unless-stopped
+    ports:
+      # 4100 on all interfaces: the box's cloudflared reaches it on loopback for
+      # truck.thehfhotel.org, and hf-mcp on evergreen reaches /feed/* across the
+      # estate's site-to-site link. The address hf-mcp uses is its own
+      # TRUCK_FEED_URL, recorded in the private ops note — never in this repo.
+      - "4100:4100"
+    environment:
+      - NODE_ENV=production
+      - TZ=Asia/Bangkok
+      - PORT=4100
+      - DATA_DIR=/data
+      - PUBLIC_URL=${PUBLIC_URL:-https://truck.thehfhotel.org}
+      - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN:-laikaexpress.cloudflareaccess.com}
+      # Empty audience = every page and API answers 503. Deliberate: a deploy
+      # that lost its secret must fail CLOSED, never open (docs/CONTRACTS.md §1).
+      - CF_ACCESS_AUD=${CF_ACCESS_AUD}
+      # Bearer for /feed/*. Empty = the feed answers 404 for everyone.
+      - FEED_TOKEN=${FEED_TOKEN}
+      - SINOTRACK_SERVER=${SINOTRACK_SERVER:-https://242.sinotrack.com}
+      # The device login. Empty leaves the poller dormant (logged once) instead
+      # of crash-looping, so a missing secret degrades rather than breaks.
+      - SINOTRACK_USER=${SINOTRACK_USER}
+      - SINOTRACK_PASSWORD=${SINOTRACK_PASSWORD}
+      - SINOTRACK_TEID=${SINOTRACK_TEID:-}
+      - POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS:-600}
+      - POLL_WINDOW_HOURS=${POLL_WINDOW_HOURS:-48}
+      # In-process nightly VACUUM INTO at 02:35 Bangkok. This box has no systemd
+      # unit we can install, so the app owns its own schedule (§1, ADR 0001).
+      - BACKUP_TIME=${BACKUP_TIME:-02:35}
+      # cloudflared runs on the box itself and reaches the container over the
+      # default bridge; nothing outside these ranges may set CF-Connecting-IP.
+      - TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:-127.0.0.1/32,172.16.0.0/12}
+      # GIT_SHA is baked into the image at build time (ARG GIT_SHA in the
+      # Dockerfile) so /healthz reports the commit that was actually built, not
+      # whatever the compose env happens to say.
+      #
+      # ALLOW_DEV_AUTH is deliberately ABSENT and must never be added here: it
+      # replaces the Cloudflare Access JWT with a plain header. The server
+      # refuses it under NODE_ENV=production, CI gates the deploy payload for
+      # it, and the box shim refuses a payload carrying it — three layers.
+    volumes:
+      # SQLite and its backups live on the host under ~/deploy-truck/app/data,
+      # so an image rollback never touches the data.
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 64M

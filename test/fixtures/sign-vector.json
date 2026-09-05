@@ -1,0 +1,19 @@
+{
+  "server": "https://242.sinotrack.com",
+  "user": "1000000001",
+  "cmd": "Proc_GetTrack",
+  "args": [
+    "1000000001",
+    1788508600,
+    1788595000,
+    1000000
+  ],
+  "data": "N'1000000001',N'1788508600',N'1788595000',N'1000000'",
+  "nTimeStamp": 1788595000000,
+  "strRandom": "12345678901234",
+  "padChar": "0",
+  "strAppID": "MjQyLnNpbm90cmFjay5jb20v",
+  "strToken": "UHJvY19HZXRUcmFjaxFOJzEwMDAwMDAwMDEnLE4nMTc4ODUwODYwMCcsTicxNzg4NTk1MDAwJyxOJzEwMDAwMDAnEREb",
+  "strSign": "0e304e7bd3227f26acbda7b41652a8cd",
+  "note": "Vector produced by the reference Python client (verified live against the vendor platform on 2026-09-05) with a synthetic device id. strToken pad uses '0' instead of random digits; the TS client accepts an injectable pad/random source so this reproduces exactly."
+}
