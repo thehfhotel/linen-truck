@@ -295,6 +295,24 @@ describe("the pages", () => {
     expect(html).not.toContain('href="/day/2026-09-06"');
   });
 
+  test("the map script never derives its FIRST view from an added layer's getBounds()", async () => {
+    // Regression for the production bug: `L.featureGroup(layers).getBounds()` on
+    // circles added before any setView/fitBounds throws in Leaflet 1.9 (a layer's
+    // projection is deferred until the map has a view), which killed the whole
+    // map script silently — no tiles, no route, attribution stuck on "Leaflet"
+    // with no "© OpenStreetMap". The initial view must come from plain lat/lon
+    // math (`L.LatLng#toBounds`), never from `getBounds()` on a layer.
+    const html = await (await app(seeded()).handle(staffReq(`/day/${YMD}`))).text();
+    const firstFit = html.indexOf("fitBounds(");
+    const firstSetView = html.indexOf("setView(");
+    expect(firstFit).toBeGreaterThan(-1);
+    expect(firstSetView).toBeGreaterThan(-1);
+    const firstView = Math.min(firstFit, firstSetView);
+    const beforeFirstView = html.slice(0, firstView);
+    expect(beforeFirstView).not.toMatch(/featureGroup\([^)]*\)\.getBounds\(\)/);
+    expect(html).toContain("toBounds(");
+  });
+
   test("/week/:ymd renders one row per day, each linking to its day page", async () => {
     const res = await app(seeded()).handle(staffReq(`/week/${YMD}`));
     expect(res.status).toBe(200);

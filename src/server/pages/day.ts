@@ -237,63 +237,84 @@ export const MAP_ESC_FN = `function esc(v) {
  */
 const MAP_SCRIPT = `
 (function () {
-  var el = document.getElementById('map');
-  var dataEl = document.getElementById('map-data');
-  if (!el || !dataEl || typeof L === 'undefined') return;
-  var cfg;
-  try { cfg = JSON.parse(dataEl.textContent || '{}'); } catch (e) { return; }
-  var sites = cfg.sites || [];
-  var txt = cfg.txt || {};
+  try {
+    var el = document.getElementById('map');
+    var dataEl = document.getElementById('map-data');
+    if (!el || !dataEl || typeof L === 'undefined') return;
+    var cfg;
+    try { cfg = JSON.parse(dataEl.textContent || '{}'); } catch (e) { return; }
+    var sites = cfg.sites || [];
+    var txt = cfg.txt || {};
 
-  var map = L.map(el, { scrollWheelZoom: false });
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    attribution: '&copy; OpenStreetMap'
-  }).addTo(map);
-
-  ${MAP_ESC_FN}
-
-  var layers = [];
-  for (var i = 0; i < sites.length; i++) {
-    var s = sites[i];
-    var circle = L.circle([s.lat, s.lon], {
-      radius: s.radiusM, color: '#7a0000', weight: 1, fillColor: '#8b0000', fillOpacity: 0.06
+    var map = L.map(el, { scrollWheelZoom: false });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap'
     }).addTo(map);
-    circle.bindPopup(esc(s.name));
-    layers.push(circle);
-  }
-  if (layers.length > 0) map.fitBounds(L.featureGroup(layers).getBounds().pad(0.25));
-  else map.setView([9.13, 99.34], 12);
 
-  fetch('/api/day/' + encodeURIComponent(el.getAttribute('data-ymd')), {
-    headers: { accept: 'application/json' },
-    credentials: 'same-origin'
-  }).then(function (r) {
-    return r.ok ? r.json() : null;
-  }).then(function (d) {
-    if (!d) return;
-    var drawn = layers.slice(0);
-    var raw = d.path || [];
-    var line = [];
-    for (var i = 0; i < raw.length; i++) line.push([raw[i][0], raw[i][1]]);
-    if (line.length > 1) {
-      drawn.push(L.polyline(line, { color: '#8b0000', weight: 4, opacity: 0.85 }).addTo(map));
+    ${MAP_ESC_FN}
+
+    // Bounds are computed from plain lat/lon math (L.LatLng#toBounds), never by
+    // asking an added layer for its own bounds: Leaflet 1.9 defers a layer's
+    // actual add until the map has a view, so a circle's bounds getter throws on
+    // an unprojected layer before that first view exists. Compute the view
+    // first, THEN add layers.
+    function siteBounds(list) {
+      var b = L.latLngBounds([]);
+      for (var i = 0; i < list.length; i++) {
+        var s = list[i];
+        b.extend(L.latLng(s.lat, s.lon).toBounds(2 * (s.radiusM || 0)));
+      }
+      return b;
     }
-    var stops = d.stops || [];
-    for (var j = 0; j < stops.length; j++) {
-      var st = stops[j];
-      var known = st.site != null;
-      var marker = L.circleMarker([st.lat, st.lon], {
-        radius: 7, weight: 2, color: '#3b0a0a',
-        fillColor: known ? '#2f855a' : '#b7791f', fillOpacity: 1
+
+    var initialBounds = siteBounds(sites);
+    if (initialBounds.isValid()) map.fitBounds(initialBounds.pad(0.25));
+    else map.setView([9.13, 99.34], 12);
+
+    var layers = [];
+    for (var i = 0; i < sites.length; i++) {
+      var s = sites[i];
+      var circle = L.circle([s.lat, s.lon], {
+        radius: s.radiusM, color: '#7a0000', weight: 1, fillColor: '#8b0000', fillOpacity: 0.06
       }).addTo(map);
-      marker.bindPopup(
-        '<b>' + esc(known ? st.site : txt.unknown) + '</b><br>' +
-        esc(st.arrive) + '–' + esc(st.depart) + ' (' + esc(st.minutes) + ' ' + esc(txt.minutes) + ')'
-      );
-      drawn.push(marker);
+      circle.bindPopup(esc(s.name));
+      layers.push(circle);
     }
-    if (drawn.length > 0) map.fitBounds(L.featureGroup(drawn).getBounds().pad(0.15));
-  }).catch(function () {});
+
+    fetch('/api/day/' + encodeURIComponent(el.getAttribute('data-ymd')), {
+      headers: { accept: 'application/json' },
+      credentials: 'same-origin'
+    }).then(function (r) {
+      return r.ok ? r.json() : null;
+    }).then(function (d) {
+      if (!d) return;
+      var finalBounds = siteBounds(sites);
+      var raw = d.path || [];
+      var line = [];
+      for (var i = 0; i < raw.length; i++) {
+        line.push([raw[i][0], raw[i][1]]);
+        finalBounds.extend([raw[i][0], raw[i][1]]);
+      }
+      if (line.length > 1) {
+        L.polyline(line, { color: '#8b0000', weight: 4, opacity: 0.85 }).addTo(map);
+      }
+      var stops = d.stops || [];
+      for (var j = 0; j < stops.length; j++) {
+        var st = stops[j];
+        var known = st.site != null;
+        var marker = L.circleMarker([st.lat, st.lon], {
+          radius: 7, weight: 2, color: '#3b0a0a',
+          fillColor: known ? '#2f855a' : '#b7791f', fillOpacity: 1
+        }).addTo(map);
+        marker.bindPopup(
+          '<b>' + esc(known ? st.site : txt.unknown) + '</b><br>' +
+          esc(st.arrive) + '–' + esc(st.depart) + ' (' + esc(st.minutes) + ' ' + esc(txt.minutes) + ')'
+        );
+        finalBounds.extend([st.lat, st.lon]);
+      }
+      if (finalBounds.isValid()) map.fitBounds(finalBounds.pad(0.15));
+    }).catch(function (e) { console.error('map:', e); });
+  } catch (e) { console.error('map:', e); }
 })();
 `;
