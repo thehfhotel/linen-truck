@@ -212,23 +212,24 @@ describe("/api/day/:ymd", () => {
     expect(body.summary.pointCount).toBe(82);
     expect(body.summary.tripCount).toBe(4);
     expect(body.summary.roundTrips).toBe(1);
-    expect(body.summary.km).toBe(15.7);
-    expect(body.summary.timeAtSiteMin).toEqual({ hf: 8, hfville: 114 });
-    expect(body.summary.findingCount).toEqual({ "unknown-stop": 1, detour: 1, "outside-hours": 0 });
+    expect(body.summary.km).toBe(15.4);
+    expect(body.summary.timeAtSiteMin).toEqual({ hf: 18, hfville: 118 });
+    expect(body.summary.findingCount).toEqual({ "unknown-stop": 0, detour: 1, "outside-hours": 0 });
     expect(body.summary.firstDeparture).toMatch(/^\d{2}:\d{2}$/);
 
     expect(body.trips).toHaveLength(4);
-    expect(body.legs).toHaveLength(2);
+    expect(body.legs).toHaveLength(3);
     expect(body.path).toHaveLength(82);
     expect(body.path[0]).toHaveLength(3);
 
+    // Every stop of this day is at a known site (§3), so the only finding left is
+    // the long way round from HF to HF Ville.
     const kinds = body.findings.map((f: { kind: string }) => f.kind);
-    expect(kinds).toEqual(["unknown-stop", "detour"]);
-    const unknown = body.findings[0];
-    expect(unknown.text.th).toContain("จอดที่ไม่รู้จัก");
-    expect(unknown.text.en).toContain("Unknown stop");
-    expect(unknown.mapUrl).toContain("https://www.google.com/maps?q=");
-    const detour = body.findings[1];
+    expect(kinds).toEqual(["detour"]);
+    const detour = body.findings[0];
+    expect(detour.text.th).toContain("อ้อมทาง");
+    expect(detour.text.en).toContain("Detour");
+    expect(detour.trips).toEqual([3]);
     expect(detour.referenceKm).toBe(4.9);
     expect(detour.ratio).toBeGreaterThan(1.25);
 
@@ -290,7 +291,8 @@ describe("the pages", () => {
     expect(html).toContain(`data-ymd="${YMD}"`);
     expect(html).toContain("/api/day/");
     // Findings first, tables after — the §8 order.
-    expect(html.indexOf("จอดที่ไม่รู้จัก")).toBeLessThan(html.indexOf('<div id="map"'));
+    expect(html).toContain("อ้อมทาง"); // the fixture's one finding, a detour
+    expect(html.indexOf("อ้อมทาง")).toBeLessThan(html.indexOf('<div id="map"'));
     // "today" hides the next-day link rather than offering an empty future.
     expect(html).not.toContain('href="/day/2026-09-06"');
   });

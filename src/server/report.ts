@@ -73,7 +73,7 @@ export const coord5 = (value: number): number => round(value, 5);
 /**
  * Whole minutes, FLOORED — elapsed time is reported as time completed, the way a
  * stopwatch reads. §9's own numbers for the 2026-09-05 fixture depend on it:
- * 510 s at HF is `8`, not `9`, and 6870 s at HF Ville is `114`, not `115`.
+ * 7110 s at HF Ville is `118`, not `119`.
  */
 export const minutesOf = (seconds: number): number => Math.floor(seconds / 60);
 

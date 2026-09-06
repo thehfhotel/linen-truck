@@ -51,7 +51,7 @@ tracker is the only input; everything else is computed.
 |---|---|
 | Scope | Audit only — read the tracker, compute, report. No write-back to SinoTrack, no dispatch, no driver-facing surface. |
 | Sites | Exactly two, checked in (`config/sites.json`): `hf` and `hfville`, each a lat/lon + radius. Adding a third site is a config change + redeploy, not a UI action. |
-| Rules | Owner-tunable via `config/rules.json` (stop radius, minimum stop duration, merge hop, schedule window, detour ratio, per-pair reference distance, engine-on voltage threshold). No settings UI — a wrong number gets fixed in a commit, not a form. |
+| Rules | Owner-tunable via `config/rules.json` (stop radius, minimum stop duration, merge hop, schedule window, detour ratio, per-pair reference distance, engine-on voltage threshold, engine-on hold window, settled-pair jitter radius). No settings UI — a wrong number gets fixed in a commit, not a form. |
 | Findings, not alerts | Findings appear on the day/week pages and in the hf-mcp owner report. No LINE push, no SMS — see the `guest-feedback`/`hk` precedent for why LINE push is reserved for genuinely time-sensitive escalations, and a linen-truck detour is a review item, not an emergency. |
 | Auth | Whole hostname behind Cloudflare Access, managers tier + the two reception kiosks (the live `housekeeping.thehfhotel.org` root policy set). No public tree. |
 | Access to raw feed | `/feed/*` is for the internal hf-mcp owner-report job only — bearer-token gated and refuses any request that shows signs of having come through Cloudflare (`Cf-Ray`/`CF-Connecting-IP` present), so it can only be reached over the estate's internal link, never from the internet even with a leaked token. |

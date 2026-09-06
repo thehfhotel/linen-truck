@@ -19,8 +19,8 @@ import type { Rules, Site } from "../domain/types.ts";
 
 /** §2 `config/sites.json`, verbatim. */
 export const DEFAULT_SITES: readonly Site[] = Object.freeze([
-  { id: "hf", name: { th: "โรงแรม HF", en: "HF Hotel" }, lat: 9.1442868, lon: 99.3245632, radiusM: 250 },
-  { id: "hfville", name: { th: "HF Ville", en: "HF Ville" }, lat: 9.1213396, lon: 99.3516676, radiusM: 250 },
+  { id: "hf", name: { th: "โรงแรม HF", en: "HF Hotel" }, lat: 9.1442868, lon: 99.3245632, radiusM: 600 },
+  { id: "hfville", name: { th: "HF Ville", en: "HF Ville" }, lat: 9.1213396, lon: 99.3516676, radiusM: 600 },
 ]);
 
 /** §2 `config/rules.json`, verbatim. */
@@ -34,6 +34,8 @@ export const DEFAULT_RULES: Rules = Object.freeze({
   detourRatio: 1.25,
   referenceKm: { "hf|hfville": 4.9 },
   engineOnVolts: 13.2,
+  engineHoldS: 300,
+  jitterRadiusM: 600,
 });
 
 /** Where the shipped files live inside the image (`WORKDIR/config`). */
@@ -68,7 +70,7 @@ function toSite(raw: unknown): Site | null {
     name: { th: str(name.th, id), en: str(name.en, id) },
     lat: r.lat,
     lon: r.lon,
-    radiusM: num(r.radiusM, 250),
+    radiusM: num(r.radiusM, 600),
   };
 }
 
@@ -102,6 +104,10 @@ export function loadRules(dir: string = configDir()): Rules {
   base.movingKmh = num(r.movingKmh, base.movingKmh);
   base.detourRatio = num(r.detourRatio, base.detourRatio);
   base.engineOnVolts = num(r.engineOnVolts, base.engineOnVolts);
+  // Added after the first deploy: a rules.json written before them still boots,
+  // and keeps the §2 values rather than an engine guard that is silently off.
+  base.engineHoldS = num(r.engineHoldS, base.engineHoldS);
+  base.jitterRadiusM = num(r.jitterRadiusM, base.jitterRadiusM);
 
   if (typeof r.schedule === "object" && r.schedule !== null) {
     const s = r.schedule as Record<string, unknown>;

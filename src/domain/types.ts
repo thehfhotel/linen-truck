@@ -42,11 +42,32 @@ export interface Rules {
   /** Key = the two site ids sorted and joined with `|`, e.g. `hf|hfville`. */
   referenceKm: Record<string, number>;
   engineOnVolts: number;
+  /**
+   * Seconds either side of a fix in which a fix at or above `engineOnVolts`
+   * still means "the engine is running" — a symmetric sample-and-hold. The
+   * charging line dips for a single fix under load (2026-09-05 13:40:45 read
+   * 12.2 V at 40 km/h between two 13.8 V fixes 90 s away), and one dip must not
+   * read as an engine stop.
+   */
+  engineHoldS: number;
+  /**
+   * The anchored stop radius between two SETTLED fixes — a fix is MOVING only
+   * when the engine is on AND it reports `speed > movingKmh`, and both ends of
+   * the comparison must be settled for this radius to apply. A parked tracker
+   * scatters its fixes (measured at HF Ville on 2026-09-06: p50 138 m, p90
+   * 333 m, max 571 m from the truck) and reports speeds of 5–107 km/h with it,
+   * and a truck warming up scatters ~180 m before it pulls away. Wider than
+   * `stopRadiusM` so that scatter stays one stop, but still a BOUND: a km-scale
+   * relocation between two settled fixes is a real journey.
+   */
+  jitterRadiusM: number;
 }
 
 /**
- * A run of points parked inside `stopRadiusM` of the run's first point.
- * `lat`/`lon` are that anchor. `virtual` marks the two book-ends the day gets
+ * A run of points parked inside `stopRadiusM` of the run's first point —
+ * `jitterRadiusM` where both that anchor and the fix are SETTLED (§3 rule 1).
+ * `lat`/`lon` are that anchor, which is also the arrival pin and the site label,
+ * so a run is never opened on a moving fix that then swallows a parking place. `virtual` marks the two book-ends the day gets
  * when the track starts or ends mid-move — they are NOT parked time and never
  * count towards `timeAtSiteS` or findings.
  */

@@ -6,7 +6,13 @@
 //
 //   * A STOP is a run of consecutive fixes that all stay within `stopRadiusM` of
 //     the run's FIRST fix — an anchor, not a rolling centroid. A drifting centroid
-//     lets a slow crawl through the sois look like one long stop.
+//     lets a slow crawl through the sois look like one long stop. The widened
+//     radius is for scatter between two SETTLED fixes, so the tight one still
+//     binds whenever either the anchor or the candidate is MOVING (engine on and
+//     over `movingKmh`); a settled pair gets `jitterRadiusM`, and an engine-off
+//     candidate the anchor's site fence too, because a parked tracker scatters its
+//     fixes around the SITE (not around the fix that happened to lead the run) and
+//     invents speeds to go with them.
 //   * The two VIRTUAL stops are book-ends, not parked time. The device only keeps
 //     ~a day of history, so a day very often starts and ends mid-move; without
 //     book-ends that movement would vanish from the trip list entirely. They are
@@ -16,6 +22,7 @@
 //     four minutes on the way still made one delivery run, and the unknown stop is
 //     reported separately as a finding.
 
+import { engineOnMask } from "./engine.ts";
 import { haversineM, siteAt } from "./geo.ts";
 import type { Leg, Point, Rules, Site, Stop, Trip } from "./types.ts";
 
@@ -56,15 +63,108 @@ function engineOnS(points: Point[], i0: number, i1: number, rules: Rules): numbe
   return s;
 }
 
-/** Rule 1: maximal anchored runs lasting at least `minStopS`. */
-function findStops(points: Point[], sites: Site[], rules: Rules): StopRun[] {
+/**
+ * Is this fix the truck actually going somewhere?
+ *
+ * Both halves are needed. `speed` alone is worthless — a PARKED tracker reports
+ * 5–107 km/h (HF Ville, 2026-09-06) — and the engine alone says nothing about
+ * movement, because the truck idles while it warms up. MOVING means the charging
+ * line is up AND the fix reports more than `movingKmh`; anything else is SETTLED.
+ */
+const isMoving = (p: Point, engineOn: boolean, rules: Rules): boolean => engineOn && p.speed > rules.movingKmh;
+
+/**
+ * May the run anchored at `anchor` still swallow the candidate fix `p`?
+ *
+ * The widened bound is for scatter BETWEEN TWO SETTLED FIXES, so the tight
+ * `stopRadiusM` applies as soon as EITHER end of the comparison is MOVING.
+ *
+ * Candidate moving: the tight bound exists for exactly one failure — a slow
+ * crawl through the sois reading as one long stop — and a fix that reports speed
+ * under a live engine is that crawl.
+ *
+ * Anchor moving: the anchor is not just a bound, it is the STOP. Its lat/lon
+ * become the arrival pin and, through `siteAt`, the site label. A run opened on
+ * a fix taken at 30 km/h on the approach road would otherwise reach 600 m
+ * forwards and swallow the parking place it was driving towards, reporting the
+ * arrival a cadence early with the pin out on the road — and a truck parked
+ * 540 m from the HF centre (measured, 2026-09-06) could be dragged outside the
+ * fence and mislabelled, which is the exact fault this whole change removes. So
+ * a moving anchor holds only 120 m: its run dies under `minStopS`, or ends at
+ * the first parked fix beyond 120 m, and the parked cluster then anchors on its
+ * OWN first fix with the wide bound. A tight run that did last ≥ `minStopS` is
+ * merged into the wide one by rule 2 exactly as before.
+ *
+ * Both settled: a parked truck scatters ~180 m even with the engine running
+ * while it warms up (2026-09-05: the restarts at 13:32:44 and 13:34:15 read
+ * 0 km/h at 177 m and 120 m from the arrival anchor, and the truck only pulled
+ * away at 13:35:15 at 37 km/h). Holding those to 120 m ended the HF Ville stop
+ * 11 minutes before the truck left, so a settled pair gets `jitterRadiusM`.
+ *
+ * With the engine OFF the fix is scatter, and scatter is around the SITE rather
+ * than around whichever fix happened to open the run. An anchor-relative bound
+ * alone only holds a parked evening together when the first fix lands near the
+ * centre: HF Ville's own 2026-09-06 scatter reaches 571 m either side of the
+ * centre, so two engine-off fixes can be ~1 140 m apart and a 600 m
+ * anchor-relative bound would split the evening into phantom stops and trips.
+ * Hence the second, centre-relative arm: a fix inside the SAME site fence as the
+ * anchor is the same parked truck, whichever fix leads. The fence is for
+ * engine-off scatter only — a settled ENGINE-ON fix is a truck about to move,
+ * so it gets the anchor-relative jitter radius and nothing wider.
+ *
+ * Every arm is a bound and not a licence — the fence is 600 m and
+ * `jitterRadiusM` is 600 m — so a km-scale hop (the feed dropping out over a
+ * real relocation) lands outside all of them and still ends the run.
+ *
+ * On a day with NO voltage at all, rule 1 calls every fix engine-on, so MOVING
+ * collapses to `speed > movingKmh` and the speed signal alone decides: a pair of
+ * fixes that both report no speed takes the jitter radius, where before this
+ * rule the tight one applied throughout. That is deliberate: a voltage-less day
+ * loses the engine signal, not the speed signal, and a settled fix 300 m from a
+ * settled anchor is parked scatter there for the same reason it is here. It
+ * widens such a day rather than leaving it byte-identical.
+ */
+function holdsCandidate(
+  anchor: Point,
+  anchorSite: Site | null,
+  anchorMoving: boolean,
+  p: Point,
+  engineOn: boolean,
+  sites: Site[],
+  rules: Rules,
+): boolean {
+  const d = haversineM(anchor, p);
+  if (anchorMoving || isMoving(p, engineOn, rules)) return d <= rules.stopRadiusM;
+  if (d <= rules.jitterRadiusM) return true;
+  return !engineOn && anchorSite !== null && siteAt(p, sites)?.id === anchorSite.id;
+}
+
+/**
+ * Rule 1: maximal anchored runs lasting at least `minStopS`.
+ *
+ * The radius the run is measured against is per-PAIR, not per-run: two SETTLED
+ * fixes may sit up to `jitterRadiusM` apart — and an engine-off candidate
+ * anywhere inside the anchor's own site fence — because a parked tracker
+ * scatters (HF Ville, 2026-09-06: p50 138 m, max 571 m), while a pair with a
+ * MOVING fix at either end is held to the tight `stopRadiusM` or the truck
+ * really was going somewhere. See `holdsCandidate` for why each arm is shaped
+ * the way it is, and why the anchor's own state is half the test.
+ */
+function findStops(points: Point[], sites: Site[], rules: Rules, engineOn: boolean[]): StopRun[] {
   const stops: StopRun[] = [];
   const n = points.length;
   let i = 0;
   while (i < n) {
     const anchor = points[i]!;
+    const anchorSite = siteAt(anchor, sites);
+    const anchorMoving = isMoving(anchor, engineOn[i]!, rules);
     let j = i;
-    while (j + 1 < n && haversineM(anchor, points[j + 1]!) <= rules.stopRadiusM) j++;
+    while (
+      j + 1 < n &&
+      holdsCandidate(anchor, anchorSite, anchorMoving, points[j + 1]!, engineOn[j + 1]!, sites, rules)
+    ) {
+      j++;
+    }
     if (points[j]!.t - anchor.t >= rules.minStopS) {
       stops.push({
         i0: i,
@@ -73,7 +173,7 @@ function findStops(points: Point[], sites: Site[], rules: Rules): StopRun[] {
         depart: points[j]!.t,
         lat: anchor.lat,
         lon: anchor.lon,
-        siteId: siteAt(anchor, sites)?.id ?? null,
+        siteId: anchorSite?.id ?? null,
         engineOnS: 0, // filled in after the merge, over the merged range
       });
       i = j + 1;
@@ -237,7 +337,8 @@ export function segment(
   rules: Rules,
 ): { stops: Stop[]; trips: Trip[]; legs: Leg[] } {
   if (points.length === 0) return { stops: [], trips: [], legs: [] };
-  const runs = addVirtualStops(mergeStops(findStops(points, sites, rules), points, rules), points, sites);
+  const engineOn = engineOnMask(points, rules);
+  const runs = addVirtualStops(mergeStops(findStops(points, sites, rules, engineOn), points, rules), points, sites);
   for (const r of runs) if (!r.virtual) r.engineOnS = engineOnS(points, r.i0, r.i1, rules);
   const trips = buildTrips(runs, points);
   const legs = buildLegs(runs, trips);

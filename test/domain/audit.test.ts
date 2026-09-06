@@ -2,36 +2,39 @@ import { describe, expect, it } from "bun:test";
 import { audit, legKey } from "../../src/domain/audit.ts";
 import { segment } from "../../src/domain/segment.ts";
 import type { Finding, Leg, Point, Rules } from "../../src/domain/types.ts";
-import { HF, HFVILLE, RULES, SITES, bkk, lerp, parked, pt } from "./support.ts";
+import {
+  HF,
+  HFVILLE,
+  RULES,
+  SITES,
+  beforeDeliveryDay,
+  bkk,
+  deliveryDay,
+  lerp,
+  parked,
+  parkedEvening,
+  pt,
+} from "./support.ts";
 
 const T0 = bkk("2026-09-05", "12:00:00");
 const EMPTY_SEG = { stops: [], trips: [], legs: [] };
 const kinds = (f: Finding[]): string[] => f.map((x) => x.kind);
-
-/** Parked at HF, a stop at nowhere, parked at HF Ville (see segment.test.ts). */
-function deliveryDay(): Point[] {
-  return [
-    ...parked(T0, HF, 11, 60),
-    pt(T0 + 660, lerp(HF, HFVILLE, 0.25), { speed: 40 }),
-    ...parked(T0 + 720, lerp(HF, HFVILLE, 0.5), 6, 60),
-    pt(T0 + 1140, lerp(HF, HFVILLE, 0.75), { speed: 55 }),
-    ...parked(T0 + 1200, HFVILLE, 11, 60),
-  ];
-}
+/** Where `deliveryDay` (support.ts) stops between the two sites — no known site. */
+const NOWHERE = lerp(HF, HFVILLE, 0.6);
 
 describe("audit — unknown stops", () => {
   it("should report a long enough stop at no known site, with its map coordinates", () => {
-    const points = deliveryDay();
+    const points = deliveryDay(T0);
     const seg = segment(points, SITES, RULES);
     const found = audit("2026-09-05", seg, points, SITES, RULES);
     const unknown = found.filter((f) => f.kind === "unknown-stop");
     expect(unknown).toHaveLength(1);
-    expect(unknown[0]).toMatchObject({ kind: "unknown-stop", durationS: 300, arrive: T0 + 720, depart: T0 + 1020 });
-    expect(unknown[0]!.kind === "unknown-stop" && unknown[0]!.lat).toBeCloseTo(lerp(HF, HFVILLE, 0.5).lat, 6);
+    expect(unknown[0]).toMatchObject({ kind: "unknown-stop", durationS: 300, arrive: T0 + 780, depart: T0 + 1080 });
+    expect(unknown[0]!.kind === "unknown-stop" && unknown[0]!.lat).toBeCloseTo(NOWHERE.lat, 6);
   });
 
   it("should stay quiet below unknownStopMinS and at a known site", () => {
-    const points = deliveryDay();
+    const points = deliveryDay(T0);
     const seg = segment(points, SITES, RULES);
     const patient: Rules = { ...RULES, unknownStopMinS: 600 };
     expect(kinds(audit("2026-09-05", seg, points, SITES, patient))).not.toContain("unknown-stop");
@@ -40,7 +43,7 @@ describe("audit — unknown stops", () => {
   });
 
   it("should never report a virtual book-end, even at no known site", () => {
-    const points = [pt(T0 - 300, lerp(HF, HFVILLE, 0.05), { speed: 44 }), ...deliveryDay()];
+    const points = [beforeDeliveryDay(T0), ...deliveryDay(T0)];
     const seg = segment(points, SITES, RULES);
     expect(seg.stops[0]!.virtual).toBe("track-start");
     expect(audit("2026-09-05", seg, points, SITES, RULES).filter((f) => f.kind === "unknown-stop")).toHaveLength(1);
@@ -134,5 +137,34 @@ describe("audit — outside hours", () => {
     const inside = [moving("23:30:00"), moving("04:00:00")];
     expect(audit("2026-09-05", EMPTY_SEG, inside, SITES, night)).toEqual([]);
     expect(kinds(audit("2026-09-05", EMPTY_SEG, [moving("12:00:00")], SITES, night))).toEqual(["outside-hours"]);
+  });
+});
+
+// §3 rule 6c, second half: a parked tracker reports speeds it never drove. On
+// 2026-09-06 16:00–21:00 the truck sat at HF Ville all evening and the day page
+// still raised 17 outside-hours findings off those bogus speeds.
+describe("audit — outside hours needs the engine ON, not just a speed", () => {
+  const EVENING = bkk("2026-09-06", "16:05:00");
+  const centre = { lat: HFVILLE.lat, lon: HFVILLE.lon };
+  const outside = (points: Point[]): Finding[] =>
+    audit("2026-09-06", EMPTY_SEG, points, SITES, RULES).filter((f) => f.kind === "outside-hours");
+
+  it("should say nothing about an evening the truck spent parked at 12.5–12.7 V", () => {
+    expect(outside(parkedEvening(EVENING, centre, [12.5, 12.6, 12.7]))).toHaveLength(0);
+  });
+
+  it("should still report the same track when the voltage says it really drove", () => {
+    const found = outside(parkedEvening(EVENING, centre, [13.8])) as Extract<
+      Finding,
+      { kind: "outside-hours" }
+    >[];
+    expect(found).toHaveLength(1);
+    expect(found[0]!.start).toBe(EVENING);
+    expect(found[0]!.end).toBe(EVENING + 2260); // the last fix over movingKmh
+  });
+
+  it("should keep reporting a day with no voltage at all — null is unknown, not off", () => {
+    const blind = parkedEvening(EVENING, centre, [12.6]).map((p) => ({ ...p, voltage: null }));
+    expect(outside(blind)).toHaveLength(1);
   });
 });

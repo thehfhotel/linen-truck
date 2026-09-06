@@ -17,11 +17,17 @@ file, but the platform does emit them while the GPS is cold, so `cleanPoints` dr
 those too.
 
 This is the day `docs/CONTRACTS.md` §3 pins the whole segmentation against — 82
-points, 4 trips, 2 legs (hfville→hf, then hf→hfville through one unknown stop),
-1 unknown stop, 1 detour, 0 outside-hours runs, ~15.7 km. `test/domain/summary.test.ts`
-asserts all of it. **Do not regenerate or re-sort this file**: it is the only
-recorded day of real truck movement, and the numbers in §3 were reviewed by the
-owner against it.
+points, 4 trips, 3 legs (hfville→hf, hf→hfville, then the short hfville→hfville
+hop), 0 unknown stops, 1 detour, 0 outside-hours runs, ~15.4 km.
+`test/domain/summary.test.ts` asserts all of it. (Until the geofences widened to
+600 m on 2026-09-06 the 14:18–14:22 stop, 368 m from the HF Ville centre, read as
+an unknown stop and the two legs after it were one. The morning HF Ville stop
+ends 13:34:15, the last fix before the truck reports movement — the two engine
+restarts before it are settled (speed 0), and §3 rule 1 reads a settled fix
+against a settled anchor as scatter whatever the engine is doing.)
+
+**Do not regenerate or re-sort this file**: it is the only recorded day of real
+truck movement, and the numbers in §3 were reviewed by the owner against it.
 
 ## `sign-vector.json`
 

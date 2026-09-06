@@ -7,6 +7,7 @@ import { summarizeDay } from "../../src/domain/summary.ts";
 import { unknownStopText, detourText, outsideHoursText } from "../../src/shared/labels.ts";
 import { loadRules, loadSites } from "../../src/server/siteConfig.ts";
 import { bangkokStamp, buildDayReport, hhmm, km1, minutesOf, ratio2, summaryOnly } from "../../src/server/report.ts";
+import { HF, HFVILLE, bkk, lerp, parked, pt } from "../domain/support.ts";
 import rawRows from "../fixtures/2026-09-05.raw.json";
 
 const TEID = "1000000001";
@@ -50,11 +51,12 @@ describe("formatting", () => {
   });
 
   test("minutes floor, km round to one place, ratios to two", () => {
-    expect(minutesOf(510)).toBe(8);
-    expect(minutesOf(6870)).toBe(114);
+    expect(minutesOf(240)).toBe(4);
+    expect(minutesOf(7110)).toBe(118); // the fixture's HF Ville total: 118.5 min is not 119
     expect(minutesOf(59)).toBe(0);
-    expect(km1(15.710809232468103)).toBe(15.7);
-    expect(ratio2(7.4 / 4.9)).toBe(1.51);
+    expect(km1(15.352071187308024)).toBe(15.4); // the fixture's day, unrounded
+    // The fixture's hf → hfville leg against its 4.9 km reference, unrounded too.
+    expect(ratio2(6.740855209569951 / 4.9)).toBe(1.38);
   });
 });
 
@@ -64,8 +66,8 @@ describe("the finding sentences", () => {
       th: "จอดที่ไม่รู้จัก 4 นาที (14:18–14:22)",
       en: "Unknown stop 4 min (14:18–14:22)",
     });
-    expect(detourText({ th: "โรงแรม HF", en: "HF Hotel" }, { th: "HF Ville", en: "HF Ville" }, 7.4, 4.9, 1.51).en).toBe(
-      "Detour HF Hotel → HF Ville 7.4 km (normally 4.9 km, 1.51×)",
+    expect(detourText({ th: "โรงแรม HF", en: "HF Hotel" }, { th: "HF Ville", en: "HF Ville" }, 6.7, 4.9, 1.38).en).toBe(
+      "Detour HF Hotel → HF Ville 6.7 km (normally 4.9 km, 1.38×)",
     );
     expect(outsideHoursText("08:12", "08:40", 3.1).th).toBe("วิ่งนอกเวลางาน 08:12–08:40 ระยะ 3.1 กม.");
   });
@@ -192,14 +194,31 @@ describe("the day-page filter fields (additive, §9)", () => {
     });
   });
 
-  test("the fixture's unknown-stop finding points at stop index 3 (14:18–14:22 at HF Ville)", () => {
-    const unknown = report.findings.find((f) => f.kind === "unknown-stop");
+  test("an unknown-stop finding points at the stop row it came from", () => {
+    // The fixture itself has raised no unknown stop since the fences widened to
+    // 600 m (§3), so the index wiring is proven on a day that does have one:
+    // parked at HF, five minutes at nowhere, parked at HF Ville.
+    const T = bkk("2026-09-03", "12:00:00");
+    const day = [
+      ...parked(T, HF, 11, 60, { voltage: 12.7 }),
+      pt(T + 660, lerp(HF, HFVILLE, 0.25), { speed: 40, voltage: 13.8 }),
+      ...parked(T + 720, lerp(HF, HFVILLE, 0.5), 6, 60, { voltage: 13.8 }),
+      pt(T + 1140, lerp(HF, HFVILLE, 0.75), { speed: 55, voltage: 13.8 }),
+      ...parked(T + 1200, HFVILLE, 11, 60, { voltage: 12.7 }),
+    ];
+    const withUnknown = build(summarizeDay("2026-09-03", day, SITES, RULES), { points: day });
+    const unknown = withUnknown.findings.find((f) => f.kind === "unknown-stop");
     expect(unknown).toBeDefined();
-    expect(unknown!.kind === "unknown-stop" && unknown!.stopIndex).toBe(3);
-    const stop = report.stops![3]!;
-    expect(stop.arrive).toBe("14:18");
-    expect(stop.depart).toBe("14:22");
+    expect(unknown!.kind === "unknown-stop" && unknown!.stopIndex).toBe(1);
+    const stop = withUnknown.stops![1]!;
+    expect(stop.arrive).toBe("12:12");
+    expect(stop.depart).toBe("12:17");
     expect(stop.site).toBeNull();
+  });
+
+  test("the fixture's own findings are one detour and nothing else", () => {
+    expect(report.findings.map((f) => f.kind)).toEqual(["detour"]);
+    expect(report.summary.findingCount).toEqual({ "unknown-stop": 0, detour: 1, "outside-hours": 0 });
   });
 
   test("an outside-hours finding carries startAt/endAt", () => {

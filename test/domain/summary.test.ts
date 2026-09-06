@@ -5,11 +5,12 @@
 // segmentation moves one of them, that is a decision, not a detail.
 
 import { describe, expect, it } from "bun:test";
+import { haversineM } from "../../src/domain/geo.ts";
 import { cleanPoints } from "../../src/domain/segment.ts";
 import { pointFromRow } from "../../src/domain/sinotrackRow.ts";
 import { summarizeDay } from "../../src/domain/summary.ts";
 import type { Finding, Point } from "../../src/domain/types.ts";
-import { RULES, SITES, bkk, pt } from "./support.ts";
+import { HFVILLE, RULES, SITES, bkk, pt } from "./support.ts";
 import rawRows from "../fixtures/2026-09-05.raw.json";
 
 const YMD = "2026-09-05";
@@ -45,42 +46,60 @@ describe("the 2026-09-05 fixture — points", () => {
 describe("the 2026-09-05 fixture — stops and trips", () => {
   it("should find the day's five stops, opening on a track-start book-end", () => {
     expect(DAY.stops).toHaveLength(5);
-    expect(DAY.stops.map((s) => s.siteId)).toEqual([null, "hfville", "hf", null, "hfville"]);
+    // Every real stop of this day is at a known site: the 14:18 one is 368 m from
+    // the HF Ville centre, inside the 600 m fence (§2).
+    expect(DAY.stops.map((s) => s.siteId)).toEqual([null, "hfville", "hf", "hfville", "hfville"]);
     expect(DAY.stops[0]!.virtual).toBe("track-start");
     expect(DAY.stops.slice(1).every((s) => s.virtual === undefined)).toBe(true);
     expect(DAY.stops[1]!.arrive).toBe(at("12:24:15"));
+    // The run is anchored on the 12:24:15 arrival fix and every fix that is not
+    // both engine-on and moving rides inside `jitterRadiusM` of it. That covers
+    // the two engine RESTARTS before departure (13:32:44 at 13.9 V and 13:34:15 at
+    // 13.8 V, both speed 0, both 120–180 m from the anchor — a warm-up scatters
+    // like any other parked truck), so the stop ends where the truck actually
+    // left: 13:35:15, the first fix reporting movement, is more than
+    // `stopRadiusM` from the anchor and starts the trip.
     expect(DAY.stops[1]!.depart).toBe(at("13:34:15"));
-    expect(DAY.stops[2]!.depart - DAY.stops[2]!.arrive).toBe(510); // 8.5 min at HF
+    expect(DAY.stops[2]!.depart - DAY.stops[2]!.arrive).toBe(1080); // 18 min at HF
+    expect(haversineM(DAY.stops[3]!, HFVILLE)).toBeCloseTo(368.4, 0);
+    expect(haversineM(DAY.stops[3]!, DAY.stops[4]!)).toBeGreaterThanOrEqual(RULES.mergeHopM); // so they stay two stops
     expect(DAY.stops[4]!.depart).toBe(at("15:11:16")); // still parked at HF Ville at the last fix
   });
 
-  it("should find four trips totalling 15.7 km", () => {
+  it("should find four trips totalling 15.4 km", () => {
     expect(DAY.tripCount).toBe(4);
-    expect(DAY.km).toBeCloseTo(15.71, 2);
+    expect(DAY.km).toBeCloseTo(15.35, 2);
     expect(DAY.trips.map((t) => t.n)).toEqual([1, 2, 3, 4]);
-    expect(DAY.trips.map((t) => t.from.siteId)).toEqual([null, "hfville", "hf", null]);
-    expect(DAY.trips.map((t) => t.to.siteId)).toEqual(["hfville", "hf", null, "hfville"]);
+    expect(DAY.trips.map((t) => t.from.siteId)).toEqual([null, "hfville", "hf", "hfville"]);
+    expect(DAY.trips.map((t) => t.to.siteId)).toEqual(["hfville", "hf", "hfville", "hfville"]);
     expect(DAY.trips[0]!.start).toBe(at("12:11:14"));
     expect(DAY.trips[0]!.end).toBe(at("12:24:15"));
     expect(DAY.trips[0]!.km).toBeCloseTo(3.5, 1);
     expect(DAY.trips[0]!.maxKmh).toBe(44);
     expect(DAY.trips[0]!.pointCount).toBe(14);
     expect(DAY.trips[0]!.path).toHaveLength(14);
-    expect(DAY.trips[1]!.km).toBeCloseTo(4.9, 1);
+    expect(DAY.trips[1]!.km).toBeCloseTo(4.76, 2); // short of the 4.9 km reference
     expect(DAY.trips[1]!.maxKmh).toBe(81);
   });
 });
 
 describe("the 2026-09-05 fixture — legs and the day's headline numbers", () => {
-  it("should form two legs, and none for the unlabelled trip 1", () => {
-    expect(DAY.legs).toHaveLength(2);
+  it("should form three legs, and none for the unlabelled trip 1", () => {
+    // Every stop of the day is now at a known site, so no leg walks through an
+    // unknown one, and the 0.4 km hop between the two HF Ville stops is a leg of
+    // its own — known site → known site, §3 rule 5, with no referenceKm to judge.
+    expect(DAY.legs).toHaveLength(3);
     expect(DAY.legs[0]).toMatchObject({ tripNs: [2], fromSiteId: "hfville", toSiteId: "hf", viaUnknownStops: 0 });
-    expect(DAY.legs[0]!.km).toBeCloseTo(4.9, 1);
-    expect(DAY.legs[1]).toMatchObject({ tripNs: [3, 4], fromSiteId: "hf", toSiteId: "hfville", viaUnknownStops: 1 });
-    expect(DAY.legs[1]!.km).toBeCloseTo(7.4, 1);
+    expect(DAY.legs[0]!.km).toBeCloseTo(4.76, 2);
+    expect(DAY.legs[1]).toMatchObject({ tripNs: [3], fromSiteId: "hf", toSiteId: "hfville", viaUnknownStops: 0 });
+    expect(DAY.legs[1]!.km).toBeCloseTo(6.74, 2);
+    expect(DAY.legs[2]).toMatchObject({ tripNs: [4], fromSiteId: "hfville", toSiteId: "hfville", viaUnknownStops: 0 });
+    expect(DAY.legs[2]!.km).toBeCloseTo(0.375, 2);
+    expect(RULES.referenceKm["hfville|hfville"]).toBeUndefined();
     expect(DAY.legs.flatMap((l) => l.tripNs)).not.toContain(1);
-    expect(DAY.legs[1]!.start).toBe(at("13:57:45"));
-    expect(DAY.legs[1]!.end).toBe(at("14:26:46"));
+    expect(DAY.legs[0]!.start).toBe(at("13:34:15"));
+    expect(DAY.legs[1]!.start).toBe(at("14:06:15"));
+    expect(DAY.legs[1]!.end).toBe(at("14:18:15"));
   });
 
   it("should count one round trip and the time parked at each site", () => {
@@ -88,32 +107,37 @@ describe("the 2026-09-05 fixture — legs and the day's headline numbers", () =>
     expect(DAY.firstDeparture).toBe(at("12:11:14"));
     expect(DAY.lastArrival).toBe(at("14:26:46"));
     expect(Object.keys(DAY.timeAtSiteS).sort()).toEqual(["hf", "hfville"]);
-    expect(DAY.timeAtSiteS.hfville).toBe(6870); // 114.5 min — the two HF Ville stops
+    expect(DAY.timeAtSiteS.hfville).toBe(7110); // 118.5 min — the three HF Ville stops
     expect(DAY.timeAtSiteS.hfville!).toBeGreaterThanOrEqual(100 * 60);
-    expect(DAY.timeAtSiteS.hf).toBe(510);
+    expect(DAY.timeAtSiteS.hf).toBe(1080);
   });
 });
 
 describe("the 2026-09-05 fixture — findings", () => {
-  it("should raise exactly one unknown stop, one detour and no outside-hours run", () => {
-    expect(DAY.findings.map((f) => f.kind)).toEqual(["unknown-stop", "detour"]);
+  it("should raise exactly one detour, no unknown stop and no outside-hours run", () => {
+    expect(DAY.findings.map((f) => f.kind)).toEqual(["detour"]);
+    expect(of("unknown-stop")).toHaveLength(0);
     expect(of("outside-hours")).toHaveLength(0);
   });
 
-  it("should place the unknown stop at 14:18–14:22, ~400 m short of HF Ville", () => {
-    const [u] = of("unknown-stop");
-    expect(u!.arrive).toBe(at("14:18:15"));
-    expect(u!.depart).toBe(at("14:22:15"));
-    expect(u!.durationS).toBe(240);
-    expect(u!.lat).toBeCloseTo(9.12332, 5);
-    expect(u!.lon).toBeCloseTo(99.34898, 5);
+  it("should keep the 14:18–14:22 stop but call it HF Ville, not an unknown stop", () => {
+    // It was reported as an unknown stop while the fence was 250 m. At 600 m it is
+    // the truck sitting in the HF Ville lane, which is not worth the owner's time.
+    const s = DAY.stops[3]!;
+    expect(s.arrive).toBe(at("14:18:15"));
+    expect(s.depart).toBe(at("14:22:15"));
+    expect(s.depart - s.arrive).toBe(240);
+    expect(s.depart - s.arrive).toBeGreaterThanOrEqual(RULES.unknownStopMinS); // long enough to have been one
+    expect(s.siteId).toBe("hfville");
+    expect(s.lat).toBeCloseTo(9.12332, 5);
+    expect(s.lon).toBeCloseTo(99.34898, 5);
   });
 
-  it("should call the hf → hfville leg a detour at ratio ~1.5", () => {
+  it("should call the hf → hfville leg a detour at ratio ~1.38", () => {
     const [d] = of("detour");
-    expect(d!.leg.tripNs).toEqual([3, 4]);
+    expect(d!.leg.tripNs).toEqual([3]);
     expect(d!.referenceKm).toBe(4.9);
-    expect(d!.ratio).toBeCloseTo(1.5, 1);
+    expect(d!.ratio).toBeCloseTo(1.376, 2);
     expect(d!.ratio).toBeGreaterThan(RULES.detourRatio);
   });
 });

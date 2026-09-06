@@ -26,11 +26,14 @@ describe("haversineM", () => {
 
 describe("siteAt", () => {
   it("should include the radius edge and exclude just beyond it", () => {
-    expect(siteAt(northOf(HF, 249.9), SITES)?.id).toBe("hf");
-    expect(siteAt(northOf(HF, 250.1), SITES)).toBeNull();
+    // The fence comes from the site, not a literal: config/sites.json is
+    // owner-tuned (250 m until 2026-09-06, 600 m since), and this test is about
+    // the boundary rule, not about today's number.
+    expect(siteAt(northOf(HF, HF.radiusM - 0.1), SITES)?.id).toBe("hf");
+    expect(siteAt(northOf(HF, HF.radiusM + 0.1), SITES)).toBeNull();
     // The edge itself is inclusive (`d <= radiusM`). Stated exactly rather than
-    // as "250 m", which lands a float ulp either side of the fence.
-    const edge = northOf(HF, 250);
+    // through `radiusM`, which lands a float ulp either side of the fence.
+    const edge = northOf(HF, HF.radiusM);
     const fence: Site[] = [{ ...HF, radiusM: haversineM(edge, HF) }];
     expect(siteAt(edge, fence)?.id).toBe("hf");
     expect(siteAt(edge, [{ ...HF, radiusM: haversineM(edge, HF) - 1e-9 }])).toBeNull();

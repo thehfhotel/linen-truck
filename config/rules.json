@@ -1,4 +1,4 @@
 { "stopRadiusM": 120, "minStopS": 180, "mergeHopM": 300, "unknownStopMinS": 180,
   "movingKmh": 5, "schedule": { "start": "12:00", "end": "16:00" },
   "detourRatio": 1.25, "referenceKm": { "hf|hfville": 4.9 },
-  "engineOnVolts": 13.2 }
+  "engineOnVolts": 13.2, "engineHoldS": 300, "jitterRadiusM": 600 }

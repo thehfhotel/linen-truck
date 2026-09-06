@@ -50,8 +50,8 @@ Production values arrive through the deploy payload `.env` rendered by CI from r
 `config/sites.json`
 ```json
 [
-  { "id": "hf",      "name": { "th": "โรงแรม HF",  "en": "HF Hotel" }, "lat": 9.1442868, "lon": 99.3245632, "radiusM": 250 },
-  { "id": "hfville", "name": { "th": "HF Ville",   "en": "HF Ville" }, "lat": 9.1213396, "lon": 99.3516676, "radiusM": 250 }
+  { "id": "hf",      "name": { "th": "โรงแรม HF",  "en": "HF Hotel" }, "lat": 9.1442868, "lon": 99.3245632, "radiusM": 600 },
+  { "id": "hfville", "name": { "th": "HF Ville",   "en": "HF Ville" }, "lat": 9.1213396, "lon": 99.3516676, "radiusM": 600 }
 ]
 ```
 `config/rules.json`
@@ -59,7 +59,7 @@ Production values arrive through the deploy payload `.env` rendered by CI from r
 { "stopRadiusM": 120, "minStopS": 180, "mergeHopM": 300, "unknownStopMinS": 180,
   "movingKmh": 5, "schedule": { "start": "12:00", "end": "16:00" },
   "detourRatio": 1.25, "referenceKm": { "hf|hfville": 4.9 },
-  "engineOnVolts": 13.2 }
+  "engineOnVolts": 13.2, "engineHoldS": 300, "jitterRadiusM": 600 }
 ```
 `referenceKm` keys are the two site ids sorted and joined with `|`. Owner tunes these files; no UI.
 
@@ -69,7 +69,8 @@ Production values arrive through the deploy payload `.env` rendered by CI from r
 export interface Point { t: number; lat: number; lon: number; speed: number; voltage: number | null } // t = epoch seconds
 export interface Site { id: string; name: { th: string; en: string }; lat: number; lon: number; radiusM: number }
 export interface Rules { stopRadiusM: number; minStopS: number; mergeHopM: number; unknownStopMinS: number; movingKmh: number;
-  schedule: { start: string; end: string }; detourRatio: number; referenceKm: Record<string, number>; engineOnVolts: number }
+  schedule: { start: string; end: string }; detourRatio: number; referenceKm: Record<string, number>; engineOnVolts: number;
+  engineHoldS: number; jitterRadiusM: number }
 export interface Stop { arrive: number; depart: number; lat: number; lon: number; siteId: string | null;
   engineOnS: number; virtual?: 'track-start' | 'track-end' }
 export interface Trip { n: number; start: number; end: number; from: { lat: number; lon: number; siteId: string | null };
@@ -88,6 +89,8 @@ export interface DaySummary { ymd: string; pointCount: number; firstPointAt: num
 export function haversineM(a: {lat:number;lon:number}, b: {lat:number;lon:number}): number
 export function siteAt(p: {lat:number;lon:number}, sites: Site[]): Site | null   // nearest site within its radiusM
 export function mapUrl(lat: number, lon: number): string  // https://www.google.com/maps?q=<lat5>,<lon5>
+// src/domain/engine.ts
+export function engineOnMask(points: Point[], rules: Rules): boolean[]   // one flag per point, in order
 // src/domain/segment.ts
 export function cleanPoints(raw: Point[]): Point[]      // sort by t, drop duplicate t (keep first), drop lat==0||lon==0
 export function segment(points: Point[], sites: Site[], rules: Rules): { stops: Stop[]; trips: Trip[]; legs: Leg[] }
@@ -99,7 +102,47 @@ export function summarizeDay(ymd: string, points: Point[], sites: Site[], rules:
 export function pointFromRow(row: Record<string, string>): Point | null  // raw platform row → Point (parses Voltages= from strOther)
 ```
 Rules (proven in the Python prototype, 2026-09-05):
-1. STOP = run of consecutive points all within `stopRadiusM` of the run's first point, lasting ≥ `minStopS`.
+1. ENGINE STATE (`engineOnMask`): a point is ENGINE-ON iff some point of the day carries voltage ≥ `engineOnVolts`
+   within ±`engineHoldS` seconds of it — a SYMMETRIC hold (the domain is an offline batch over a finished day, so
+   non-causal is fine, and the charging line dips for a single fix under load). A day with no non-null voltage
+   anywhere is entirely ENGINE-ON: null is unknown, never "off", so a point source without voltage is never declared
+   parked all day (its settled points still take the wide radius — see the CONSEQUENCE below).
+   A point is MOVING iff ENGINE-ON AND `speed > movingKmh`; otherwise it is SETTLED. Neither signal is usable alone:
+   a parked tracker invents 5–107 km/h, and a truck warming up idles at a driving voltage without moving.
+   STOP = run of consecutive points all within `stopRadiusM` of the run's first point, lasting ≥ `minStopS` — widened
+   for scatter between two SETTLED points, because a parked tracker scatters its fixes (HF Ville 2026-09-06: p50 138 m,
+   p90 333 m, p95 496 m, max 571 m from the CENTRE) and reports those bogus speeds with them.
+   Precisely: extend the run to point j+1 while
+   `(MOVING(anchor) || MOVING(j+1)) ? haversine(anchor, j+1) ≤ stopRadiusM
+   : (haversine(anchor, j+1) ≤ jitterRadiusM || (!engineOn(j+1) && siteAt(j+1) !== null && siteAt(j+1).id === siteAt(anchor)?.id))`.
+   The tight bound binds as soon as EITHER end of the comparison is MOVING, for two different reasons.
+   A MOVING CANDIDATE: the tight bound exists for exactly one failure — a slow crawl through the sois reading as one
+   long stop — and a point that reports no speed under a live engine cannot be that crawl, while a truck warming up
+   scatters ~180 m with the engine already running (the fixture restarts at 13:32:44 and 13:34:15 read 0 km/h at 177 m
+   and 120 m from the arrival anchor, and the truck only pulls away at 13:35:15 at 37 km/h). Holding those to
+   `stopRadiusM` ended the HF Ville stop eleven minutes before the truck left, so a settled pair gets `jitterRadiusM`.
+   A MOVING ANCHOR: the anchor is not merely a bound, it IS the stop — `lat`/`lon` are the arrival pin and, through
+   `siteAt`, the site label. A run opened on a fix taken at 30 km/h on the approach road would otherwise reach 600 m
+   forwards and swallow the parking place it was driving towards, reporting the arrival a cadence early with the pin
+   out on the road; a truck parked 540 m from the HF centre (measured 2026-09-06) anchored 500 m further out reads
+   1 040 m from the centre, outside the fence, and the day reports an unknown stop — the exact mislabel the 600 m fence
+   exists to remove. CONSEQUENCE: a run anchored on a MOVING point can only hold points within `stopRadiusM`, so it
+   either dies under `minStopS` or ends at the first parked point beyond `stopRadiusM`, and the parked cluster then
+   anchors on its OWN first point with the wide bound. Where such a tight run does last ≥ `minStopS`, rule 2 merges it
+   into the following wide run exactly as it always did.
+   The same-fence half is for ENGINE-OFF candidates only, and the engine-off arm needs BOTH halves: the scatter is
+   measured from the site centre, so two engine-off fixes can be ~1 140 m apart (+571 and −520) and an anchor-relative
+   bound alone would hold the evening together only when the first fix of the run happened to land near the centre —
+   rotate which fix leads and the same twenty places split into up to five stops, four trips and ~2.3 km nobody drove.
+   The same-fence half is centre-relative and fixes that. A settled ENGINE-ON point gets the anchor-relative
+   `jitterRadiusM` and not the fence: it is a truck about to move, not a truck that has been sitting there all evening.
+   Every arm is a bound, not a licence (`jitterRadiusM` 600 m, the fence 600 m), so a km-scale relocation between two
+   engine-off fixes stays two stops and a trip.
+   CONSEQUENCE, deliberate: on a day with NO voltage at all every point is ENGINE-ON (see above), so MOVING collapses to
+   `speed > movingKmh` and the speed signal alone decides; a pair of points that both report no speed takes
+   `jitterRadiusM`, where the tight bound used to apply throughout. Such a day is not left byte-identical to the
+   pre-rule-1 behaviour. That is an improvement, not a regression: a voltage-less day loses the engine signal, not the
+   speed signal, and a settled point 300 m from a settled anchor is parked scatter there for the same reason it is here.
    `siteId` = `siteAt(anchor)`. `engineOnS` = sample-and-hold: the sum of the gaps between consecutive fixes of the run whose EARLIER fix has voltage ≥ `engineOnVolts` (a null voltage never counts; 0 if no voltage data).
 2. Merge consecutive stops with the same `siteId` (not null) when the hop between their anchors < `mergeHopM` AND the haversine travel over the points between them is also < `mergeHopM` (yard shuffle only — an out-and-back run with no far-end stop is never swallowed).
 3. Virtual stop at the first point (`track-start`) if the day does not begin inside a stop; virtual `track-end` at the last point if
@@ -109,14 +152,29 @@ Rules (proven in the Python prototype, 2026-09-05):
    Trips that begin or end at a virtual stop or never reach a known site form no leg.
 6. Findings: `unknown-stop` for a non-virtual stop with `siteId === null` and duration ≥ `unknownStopMinS`;
    `detour` for a leg whose `referenceKm[sorted pair]` exists and `km / referenceKm > detourRatio`;
-   `outside-hours` for maximal runs of moving points (speed > `movingKmh`) with Bangkok wall-clock outside
-   [schedule.start, schedule.end) — runs split when the gap between moving points > 600 s; km = haversine within the run.
+   `outside-hours` for maximal runs of MOVING points — speed > `movingKmh` AND ENGINE-ON, because a parked tracker's
+   speed is jitter, not a journey — with Bangkok wall-clock outside [schedule.start, schedule.end); runs split when the
+   gap between moving points > 600 s; km = haversine within the run. `maxKmh` on a trip is unaffected (trips are
+   between stops, so a trip already means the truck went somewhere).
+   KNOWN BLIND SPOT, accepted deliberately: this is the only unauthorised-use detector and it now depends entirely on the
+   charging line. A tracker running on its internal battery (failed charging line, feed pulled) reads 12.x V all day, so
+   every point is ENGINE-OFF and NO outside-hours finding is raised, while trips and km are still reported. The
+   all-null inertness escape hatch does not cover it — a partial voltage outage is ENGINE-OFF, not unknown. A
+   displacement-based compensator was considered and rejected for now: parked scatter spans up to ~1 140 m, so any
+   threshold small enough to catch a short night errand also re-fires on a parked evening. The signal to watch is a day
+   whose voltage never reaches `engineOnVolts` yet still reports kilometres; treat that as a tracker fault, not a quiet
+   day.
 7. `roundTrips` = min(#legs hf→hfville, #legs hfville→hf). `firstDeparture` = the first trip's start (equivalently the first stop's
    departure, virtual book-end included), null on a day with no trip; `lastArrival` = arrive of the last non-virtual stop. `timeAtSiteS` sums non-virtual stop durations per site.
 8. Day window = Bangkok [00:00, 24:00) of `ymd`; points outside are ignored by `summarizeDay`.
-Expected on the fixture (rules above, sites above): 82 points after cleaning, 4 trips, legs: [hfville→hf (trip 2, 4.9 km),
-hf→hfville (trips 3–4, ~7.4 km, viaUnknownStops 1)], findings = 1 × unknown-stop (14:18–14:22, ~4 min, ~400 m from HF Ville)
-+ 1 × detour (leg hf→hfville, ratio ≈ 1.5), 0 × outside-hours. Trip 1 (unlabelled start → hfville, 3.5 km) forms no leg.
+Expected on the fixture (rules above, sites above): 82 points after cleaning; 5 stops — a `track-start` book-end, then
+hfville 12:24–13:34, hf 13:48–14:06, hfville 14:18–14:22 and hfville 14:26–15:11; 4 trips totalling 15.35 km; legs:
+[hfville→hf (trip 2, 4.76 km), hf→hfville (trip 3, 6.74 km), hfville→hfville (trip 4, 0.37 km), all viaUnknownStops 0];
+findings = 1 × detour (leg hf→hfville, ratio ≈ 1.38), 0 × unknown-stop — the 14:18–14:22 stop sits 368 m from the HF Ville
+centre, inside the 600 m fence, and its 381 m hop to the 14:26 stop is ≥ `mergeHopM`, so the two stay separate — and
+0 × outside-hours. Trip 1 (unlabelled start → hfville, 3.48 km) forms no leg. `roundTrips` 1, `timeAtSiteS`
+{ hfville 7110, hf 1080 }. The morning stop ends at 13:34:15, the last fix before the truck reports movement: the
+13:32:44 and 13:34:15 engine restarts are SETTLED (speed 0), so rule 1 holds them as scatter, not as a departure.
 
 ## 4. SinoTrack client (`src/server/sinotrack.ts`) — port of the proven Python client
 - `POST {server}/APP/AppJson.asp` form-urlencoded fields `strAppID, strUser, nTimeStamp, strRandom, strSign, strToken`; no cookies.
@@ -182,18 +240,19 @@ Branding: HF One staff burgundy like feedback's /staff (not the crimson guest pa
 ```json
 { "date": "2026-09-05", "tz": "Asia/Bangkok", "generatedAt": 1788600000,
   "device": { "teid": "1000000001", "lastSeenAt": 1788595367, "voltage": 12.7, "moving": false, "online": true },
-  "summary": { "km": 15.7, "tripCount": 4, "roundTrips": 1, "firstDeparture": "12:11", "lastArrival": "14:26",
-               "timeAtSiteMin": { "hf": 8, "hfville": 114 }, "pointCount": 82, "findingCount": { "unknown-stop": 1, "detour": 1, "outside-hours": 0 } },
+  "summary": { "km": 15.4, "tripCount": 4, "roundTrips": 1, "firstDeparture": "12:11", "lastArrival": "14:26",
+               "timeAtSiteMin": { "hf": 18, "hfville": 118 }, "pointCount": 82, "findingCount": { "unknown-stop": 0, "detour": 1, "outside-hours": 0 } },
   "trips": [ { "n": 1, "start": "12:11", "end": "12:24", "minutes": 13, "km": 3.5, "maxKmh": 44, "from": null, "to": "hfville",
                "fromMapUrl": "…", "toMapUrl": "…" } ],
   "stops": [ { "arrive": "12:24", "depart": "13:34", "minutes": 70, "site": "hfville", "lat": 9.12223, "lon": 99.35179, "mapUrl": "…", "engineOnMin": 5 } ],
-  "legs":  [ { "trips": [3,4], "from": "hf", "to": "hfville", "km": 7.4, "referenceKm": 4.9, "ratio": 1.5 } ],
+  "legs":  [ { "trips": [3], "from": "hf", "to": "hfville", "km": 6.7, "referenceKm": 4.9, "ratio": 1.38 } ],
   "findings": [ { "kind": "unknown-stop", "text": { "th": "จอดที่ไม่รู้จัก 4 นาที (14:18–14:22)", "en": "Unknown stop 4 min (14:18–14:22)" }, "mapUrl": "…", "minutes": 4, "start": "14:18", "end": "14:22" },
-                { "kind": "detour", "text": { "th": "…", "en": "…" }, "trips": [3,4], "from": "hf", "to": "hfville", "km": 7.4, "referenceKm": 4.9, "ratio": 1.5 },
+                { "kind": "detour", "text": { "th": "…", "en": "…" }, "trips": [3], "from": "hf", "to": "hfville", "km": 6.7, "referenceKm": 4.9, "ratio": 1.38 },
                 { "kind": "outside-hours", "text": { "th": "…", "en": "…" }, "start": "…", "end": "…", "km": 0 } ],
   "path": [ [9.14791, 99.33564, 1788585074], … ],
   "dataQuality": { "lastPollAt": 1788599000, "lastPollOk": true, "note": null } }
 ```
+The three finding entries above are a SHAPE catalogue: the 2026-09-05 fixture itself raises only the detour (see §3).
 `/api/week` and `/feed/range` return the same objects without `trips`, `stops`, `legs`, `path` (findings kept).
 Additive since 2026-09-05 (map filtering): trips also carry `startAt`/`endAt` (epoch s), stops `arriveAt`/`departAt`,
 unknown-stop findings `stopIndex` (index into `stops`), outside-hours findings `startAt`/`endAt`. Day page selection is

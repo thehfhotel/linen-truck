@@ -6,6 +6,7 @@
 // choice (`unknownStopMinS`), a leg must be a quarter longer than the known route
 // (`detourRatio`), and movement must be real movement (`movingKmh`).
 
+import { engineOnMask } from "./engine.ts";
 import { haversineM } from "./geo.ts";
 import { bangkokMinuteOfDay, parseHhMm } from "./clock.ts";
 import type { Finding, Point, Rules, Site, Stop } from "./types.ts";
@@ -53,8 +54,23 @@ function detours(legs: ReturnType<typeof segment>["legs"], rules: Rules): Findin
  * schedule. Only fixes that are BOTH moving and outside hours join a run, and a
  * gap over `RUN_SPLIT_S` starts a new one — otherwise a truck parked overnight
  * between two evening errands would be reported as one seven-hour excursion.
+ *
+ * MOVING means `speed > movingKmh` AND the engine on. A parked tracker reports
+ * speeds it never drove (HF Ville, 2026-09-06 16:00–21:00: 5–107 km/h at 12.4–
+ * 12.7 V, and 17 outside-hours findings for a truck that stood still all
+ * evening), so a speed on its own is not evidence that anybody drove anywhere.
+ *
+ * The accepted cost (§3 rule 6, "KNOWN BLIND SPOT"): this is the only
+ * unauthorised-use detector and it now rests entirely on the charging line, so a
+ * tracker on its internal battery — a failed charging line, or a feed pulled on
+ * purpose — reads 12.x V all day, every fix is engine-off, and nothing is
+ * reported here even though the day still shows trips and kilometres. A
+ * displacement compensator was considered and rejected: parked scatter spans up
+ * to ~1 140 m, so any bound tight enough to catch a short night errand fires on a
+ * parked evening again. A day with kilometres but no fix ever at `engineOnVolts`
+ * is a tracker fault to chase, not a quiet day.
  */
-function outsideHours(points: Point[], rules: Rules): Finding[] {
+function outsideHours(points: Point[], rules: Rules, engineOn: boolean[]): Finding[] {
   const startM = parseHhMm(rules.schedule.start);
   const endM = parseHhMm(rules.schedule.end);
   const out: Finding[] = [];
@@ -66,8 +82,9 @@ function outsideHours(points: Point[], rules: Rules): Finding[] {
     out.push({ kind: "outside-hours", start: run[0]!.t, end: run[run.length - 1]!.t, km: m / 1000 });
     run = [];
   };
-  for (const p of points) {
-    if (p.speed <= rules.movingKmh) continue;
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i]!;
+    if (p.speed <= rules.movingKmh || !engineOn[i]!) continue;
     if (insideSchedule(bangkokMinuteOfDay(p.t), startM, endM)) continue;
     if (run.length > 0 && p.t - run[run.length - 1]!.t > RUN_SPLIT_S) flush();
     run.push(p);
@@ -91,5 +108,6 @@ export function audit(
 ): Finding[] {
   void ymd;
   void sites;
-  return [...unknownStops(seg.stops, rules), ...detours(seg.legs, rules), ...outsideHours(points, rules)];
+  const engineOn = engineOnMask(points, rules);
+  return [...unknownStops(seg.stops, rules), ...detours(seg.legs, rules), ...outsideHours(points, rules, engineOn)];
 }

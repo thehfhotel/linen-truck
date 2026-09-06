@@ -11,6 +11,7 @@ import type { Point } from "../../src/domain/types.ts";
 import { buildDayReport } from "../../src/server/report.ts";
 import { renderDayPage } from "../../src/server/pages/day.ts";
 import { loadRules, loadSites } from "../../src/server/siteConfig.ts";
+import { HF, HFVILLE, bkk, lerp, parked, pt } from "../domain/support.ts";
 import rawRows from "../fixtures/2026-09-05.raw.json";
 
 const TEID = "1000000001";
@@ -69,18 +70,40 @@ describe("the day page's chip row and data attributes", () => {
     for (let i = 0; i < 5; i++) expect(html).toContain(`<tr data-stop="${i}"`);
   });
 
-  test("the unknown-stop finding carries data-stop for the same index its stop row uses", () => {
-    expect(html).toMatch(/<li class="unknown-stop" data-stop="3">/);
-    expect(html).toContain('data-select="stop-3"');
+  test("the detour finding carries data-trips and a trip-select button", () => {
+    // One trip, not two: with the 600 m fence the 14:18 stop is HF Ville, so the
+    // hf → hfville leg no longer walks through an unknown stop (§3 rules 5–6).
+    expect(html).toMatch(/<li class="detour" data-trips="3">/);
+    expect(html).toContain('data-select="trip-3"');
   });
 
-  test("the detour finding carries data-trips and a trip-select button", () => {
-    expect(html).toMatch(/<li class="detour" data-trips="3,4">/);
-    expect(html).toContain('data-select="trip-3-4"');
+  test("this day raises no unknown stop, so no finding claims a stop row", () => {
+    expect(html).not.toContain('class="unknown-stop"');
   });
 
   test("no stray template artefacts reach the page (every interpolation resolved)", () => {
     expect(html).not.toContain("[object Object]");
+  });
+});
+
+// The fixture has had no unknown stop since the geofences widened to 600 m, so
+// the `data-stop` wiring between a finding and its stop row needs a day that
+// does: parked at HF, five minutes at nowhere, parked at HF Ville.
+describe("an unknown-stop finding and its stop row", () => {
+  const T = bkk("2026-09-03", "12:00:00");
+  const nowhere = lerp(HF, HFVILLE, 0.5);
+  const html = pageFor("2026-09-03", [
+    ...parked(T, HF, 11, 60, { voltage: 12.7 }),
+    pt(T + 660, lerp(HF, HFVILLE, 0.25), { speed: 40, voltage: 13.8 }),
+    ...parked(T + 720, nowhere, 6, 60, { voltage: 13.8 }),
+    pt(T + 1140, lerp(HF, HFVILLE, 0.75), { speed: 55, voltage: 13.8 }),
+    ...parked(T + 1200, HFVILLE, 11, 60, { voltage: 12.7 }),
+  ]);
+
+  test("the finding carries data-stop for the same index its stop row uses", () => {
+    expect(html).toMatch(/<li class="unknown-stop" data-stop="1">/);
+    expect(html).toContain('data-select="stop-1"');
+    expect(html).toContain('<tr data-stop="1"');
   });
 });
 
