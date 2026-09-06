@@ -25,14 +25,32 @@ function insideSchedule(minute: number, startM: number, endM: number): boolean {
   return startM <= endM ? minute >= startM && minute < endM : minute >= startM || minute < endM;
 }
 
-/** Rule 6a: a real stop, long enough to be a decision, at no known site. */
+/**
+ * Rule 6a: a real stop, long enough to be a decision, at no known site.
+ *
+ * The TRIGGER is unchanged by the engine events (owner, 2026-09-06: "halt no
+ * threshold — just mention engine status; still want to know halted locations
+ * too, might have some stops that need audit"). The stop's ignition state rides
+ * along on the finding so the sentence can say whether the driver switched off
+ * or sat there idling — a halt in traffic and a truck parked up are different
+ * events at the same coordinates — but neither state suppresses or raises one.
+ */
 function unknownStops(stops: Stop[], rules: Rules): Finding[] {
   const out: Finding[] = [];
   for (const s of stops) {
     if (s.virtual || s.siteId !== null) continue;
     const durationS = s.depart - s.arrive;
     if (durationS < rules.unknownStopMinS) continue;
-    out.push({ kind: "unknown-stop", arrive: s.arrive, depart: s.depart, lat: s.lat, lon: s.lon, durationS });
+    out.push({
+      kind: "unknown-stop",
+      arrive: s.arrive,
+      depart: s.depart,
+      lat: s.lat,
+      lon: s.lon,
+      durationS,
+      engine: s.engine.kind,
+      engineOffS: s.engine.offS,
+    });
   }
   return out;
 }

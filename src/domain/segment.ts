@@ -22,9 +22,9 @@
 //     four minutes on the way still made one delivery run, and the unknown stop is
 //     reported separately as a finding.
 
-import { engineOnMask } from "./engine.ts";
+import { engineEvents, engineOnMask } from "./engine.ts";
 import { haversineM, siteAt } from "./geo.ts";
-import type { Leg, Point, Rules, Site, Stop, Trip } from "./types.ts";
+import type { Leg, Point, Rules, Site, Stop, StopEngine, Trip } from "./types.ts";
 
 /** A stop plus the point-index range it covers — internal, trips need the indices. */
 interface StopRun extends Stop {
@@ -52,6 +52,15 @@ export function cleanPoints(raw: readonly Point[]): Point[] {
   }
   return out;
 }
+
+/**
+ * The inert engine events a stop carries before it has any: the value the two
+ * virtual book-ends keep for good (they are a single fix of a day that opened or
+ * closed mid-move, not parked time), and the placeholder a real run holds until
+ * the merge is done and its range is final. A fresh object each time — a shared
+ * literal would put one `StopEngine` on every book-end of every day.
+ */
+const noEngineEvents = (): StopEngine => ({ kind: "unknown", offAt: null, onAt: null, offS: 0 });
 
 /** Seconds of `points[i0..i1]` held above `engineOnVolts`, sample-and-hold. */
 function engineOnS(points: Point[], i0: number, i1: number, rules: Rules): number {
@@ -175,6 +184,7 @@ function findStops(points: Point[], sites: Site[], rules: Rules, engineOn: boole
         lon: anchor.lon,
         siteId: anchorSite?.id ?? null,
         engineOnS: 0, // filled in after the merge, over the merged range
+        engine: noEngineEvents(), // ditto — the ignition events of the merged range
       });
       i = j + 1;
     } else {
@@ -239,6 +249,7 @@ function addVirtualStops(stops: StopRun[], points: Point[], sites: Site[]): Stop
       lon: first.lon,
       siteId: siteAt(first, sites)?.id ?? null,
       engineOnS: 0,
+      engine: noEngineEvents(),
       virtual: "track-start",
     });
   }
@@ -253,6 +264,7 @@ function addVirtualStops(stops: StopRun[], points: Point[], sites: Site[]): Stop
       lon: last.lon,
       siteId: siteAt(last, sites)?.id ?? null,
       engineOnS: 0,
+      engine: noEngineEvents(),
       virtual: "track-end",
     });
   }
@@ -339,7 +351,11 @@ export function segment(
   if (points.length === 0) return { stops: [], trips: [], legs: [] };
   const engineOn = engineOnMask(points, rules);
   const runs = addVirtualStops(mergeStops(findStops(points, sites, rules, engineOn), points, rules), points, sites);
-  for (const r of runs) if (!r.virtual) r.engineOnS = engineOnS(points, r.i0, r.i1, rules);
+  for (const r of runs) {
+    if (r.virtual) continue;
+    r.engineOnS = engineOnS(points, r.i0, r.i1, rules);
+    r.engine = engineEvents(points, r.i0, r.i1, rules);
+  }
   const trips = buildTrips(runs, points);
   const legs = buildLegs(runs, trips);
   const stops: Stop[] = runs.map(({ i0: _i0, i1: _i1, ...s }) => s);

@@ -64,6 +64,27 @@ export interface Rules {
 }
 
 /**
+ * What the ignition did inside one stop (§3 rule 1, "engine events").
+ *
+ * Read from the RAW voltage of the stop's own fixes, never from the held mask:
+ * the hold exists so a dip under load does not read as an engine stop while the
+ * truck is MOVING, and this is the opposite question — did the driver switch
+ * off and wait here, or is the truck merely halted with the engine running?
+ * `kind` is `unknown` only when no fix of the stop carries a voltage at all;
+ * null is unknown, never "off", exactly as in `engineOnMask`.
+ */
+export interface StopEngine {
+  /** `parked` if any reading is off, `running` if every reading is on, `unknown` with no voltage. */
+  kind: "parked" | "running" | "unknown";
+  /** First fix reading off — the arrival fix itself when the truck came in already off. */
+  offAt: number | null;
+  /** First ON reading after the LAST off-run; null if the engine was still off at the last fix. */
+  onAt: number | null;
+  /** Seconds in the off state, sample-and-hold like `engineOnS`. */
+  offS: number;
+}
+
+/**
  * A run of points parked inside `stopRadiusM` of the run's first point —
  * `jitterRadiusM` where both that anchor and the fix are SETTLED (§3 rule 1).
  * `lat`/`lon` are that anchor, which is also the arrival pin and the site label,
@@ -78,6 +99,11 @@ export interface Stop {
   lon: number;
   siteId: string | null;
   engineOnS: number;
+  /**
+   * The stop's ignition events. The two virtual book-ends are not parked time,
+   * so they carry the inert `{ kind: "unknown", offAt: null, onAt: null, offS: 0 }`.
+   */
+  engine: StopEngine;
   virtual?: "track-start" | "track-end";
 }
 
@@ -107,7 +133,17 @@ export interface Leg {
 
 /** Something the owner should look at. Rendered by the report layer (§9). */
 export type Finding =
-  | { kind: "unknown-stop"; arrive: number; depart: number; lat: number; lon: number; durationS: number }
+  | {
+      kind: "unknown-stop";
+      arrive: number;
+      depart: number;
+      lat: number;
+      lon: number;
+      durationS: number;
+      /** The stop's engine state — reported, never a trigger: the rule is unchanged (§3 rule 6). */
+      engine: StopEngine["kind"];
+      engineOffS: number;
+    }
   | { kind: "detour"; leg: Leg; referenceKm: number; ratio: number }
   | { kind: "outside-hours"; start: number; end: number; km: number };
 

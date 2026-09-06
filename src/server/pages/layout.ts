@@ -122,6 +122,8 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line
 th { color: var(--ink-muted); font-weight: 600; font-size: 11px; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 tr.virtual td { color: var(--ink-muted); font-style: italic; }
+.badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--tint); color: var(--ink-muted); white-space: nowrap; }
+.badge.engine-running { border-color: var(--warn); color: var(--warn); background: #fff; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
 .chip { font: inherit; font-size: 12px; cursor: pointer; padding: 6px 10px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--panel); color: var(--brand-700); }
 .chip.active { background: var(--brand-600); border-color: var(--brand-600); color: #fff; font-weight: 600; }

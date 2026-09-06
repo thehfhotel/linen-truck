@@ -168,3 +168,52 @@ describe("audit — outside hours needs the engine ON, not just a speed", () => 
     expect(outside(blind)).toHaveLength(1);
   });
 });
+
+// The owner's ask (2026-09-06): "mark stop with engine stop/start too,
+// differentiate between traffic and stops". NO new finding kind and NO new
+// threshold — the unknown-stop trigger is exactly what it was; the finding just
+// says what the ignition was doing, so a halt with the engine running reads
+// differently from a truck parked up with the driver gone.
+describe("audit — an unknown stop carries its engine status", () => {
+  /** `deliveryDay`'s nowhere stop, but idling instead of switched off. */
+  const idlingDay = (): Point[] =>
+    deliveryDay(T0).map((p) =>
+      p.lat === NOWHERE.lat && p.lon === NOWHERE.lon ? { ...p, voltage: 13.8 } : p,
+    );
+
+  const unknownStop = (points: Point[]): Extract<Finding, { kind: "unknown-stop" }> => {
+    const seg = segment(points, SITES, RULES);
+    const found = audit("2026-09-05", seg, points, SITES, RULES).filter((f) => f.kind === "unknown-stop");
+    expect(found).toHaveLength(1);
+    return found[0] as Extract<Finding, { kind: "unknown-stop" }>;
+  };
+
+  it("should call a stop the driver switched off PARKED, with its off seconds", () => {
+    const f = unknownStop(deliveryDay(T0));
+    expect(f.engine).toBe("parked");
+    expect(f.engineOffS).toBe(300); // the whole five minutes at 12.7 V
+    expect(f.durationS).toBe(300);
+  });
+
+  it("should call the same stop RUNNING when the engine never stopped", () => {
+    const f = unknownStop(idlingDay());
+    expect(f.engine).toBe("running");
+    expect(f.engineOffS).toBe(0);
+    expect(f.durationS).toBe(300); // the trigger itself is unchanged
+  });
+
+  it("should say unknown when the day carries no voltage at all", () => {
+    const blind = deliveryDay(T0).map((p) => ({ ...p, voltage: null }));
+    const f = unknownStop(blind);
+    expect(f.engine).toBe("unknown");
+    expect(f.engineOffS).toBe(0);
+  });
+
+  it("should not fire on a short halt just because the engine was running", () => {
+    // No new threshold: below unknownStopMinS there is still nothing to report.
+    const points = idlingDay();
+    const seg = segment(points, SITES, RULES);
+    const patient: Rules = { ...RULES, unknownStopMinS: 600 };
+    expect(kinds(audit("2026-09-05", seg, points, SITES, patient))).not.toContain("unknown-stop");
+  });
+});

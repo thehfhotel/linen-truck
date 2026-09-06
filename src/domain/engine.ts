@@ -19,8 +19,11 @@
 //     on 2026-09-06), but a future point source without it must leave the report
 //     exactly as it is now rather than silently declaring the truck parked all
 //     day: null is unknown, never "off".
+//
+// `engineEvents` below asks a DIFFERENT question of the same volts and therefore
+// reads them differently — see its own comment.
 
-import type { Point, Rules } from "./types.ts";
+import type { Point, Rules, StopEngine } from "./types.ts";
 
 /**
  * One flag per point, in the same order: true where the engine was running.
@@ -54,4 +57,66 @@ export function engineOnMask(points: readonly Point[], rules: Rules): boolean[] 
     }
     return lo < hot.length && hot[lo]! <= p.t + hold;
   });
+}
+
+/**
+ * The ignition events inside ONE stop: `points[i0..i1]`, the stop's own range.
+ *
+ * Deliberately RAW voltage, not `engineOnMask`. The mask holds a fix ON across a
+ * dip because it answers "was the truck under power while it moved", and a hold
+ * that survives 300 s would swallow exactly the event this function exists to
+ * report: the driver switching off for a minute at a place he should not be
+ * stopped at. Here each fix answers for itself — at or above `engineOnVolts` is
+ * ON, under it is OFF — and only a NULL fix borrows anything, carrying the
+ * previous fix's state forward (null is unknown, never "off", the same rule the
+ * mask keeps). A fix with no state yet — a leading null stretch, before the stop
+ * has seen any voltage at all — answers for nothing: it is neither on nor off,
+ * and the seconds it spans count towards neither.
+ *
+ * `kind` is therefore `unknown` only for a range with NO voltage anywhere,
+ * `running` when every reading is on, and `parked` as soon as one reading is
+ * off — an owner who asked to "differentiate between traffic and stops" is asking
+ * whether the engine was ever switched off here, not for a threshold.
+ *
+ * `offAt` is the first fix reading off (the arrival fix itself when the truck
+ * came in already switched off) and `onAt` the first ON reading after the LAST
+ * off-run, so an engine that cycled twice reports the restart the truck actually
+ * left on; `onAt` stays null while the engine was still off at the stop's last
+ * fix. `offS` is sample-and-hold exactly like `engineOnS` in `segment.ts`: each
+ * gap counts to the state of the EARLIER of its two fixes, so the final fix's
+ * state adds nothing.
+ */
+export function engineEvents(
+  points: readonly Point[],
+  i0: number,
+  i1: number,
+  rules: Rules,
+): StopEngine {
+  const inert: StopEngine = { kind: "unknown", offAt: null, onAt: null, offS: 0 };
+  const from = Math.max(i0, 0);
+  const to = Math.min(i1, points.length - 1);
+  if (to < from) return inert;
+
+  let state: boolean | null = null; // null = no reading yet, so no state to hold
+  let sawVoltage = false;
+  let offAt: number | null = null;
+  let lastOff = -1;
+  let offS = 0;
+
+  for (let k = from; k <= to; k++) {
+    const p = points[k]!;
+    if (p.voltage !== null) {
+      sawVoltage = true;
+      state = p.voltage >= rules.engineOnVolts;
+    }
+    if (state === false) {
+      if (offAt === null) offAt = p.t;
+      lastOff = k;
+      if (k < to) offS += points[k + 1]!.t - p.t;
+    }
+  }
+
+  if (!sawVoltage) return inert;
+  if (lastOff < 0) return { kind: "running", offAt: null, onAt: null, offS: 0 };
+  return { kind: "parked", offAt, onAt: lastOff < to ? points[lastOff + 1]!.t : null, offS };
 }

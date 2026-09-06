@@ -364,3 +364,61 @@ describe("segment — a moving anchor holds only stopRadiusM (§3 rule 1)", () =
     expect(real[0]!.lat).toBeCloseTo(yard.lat, 9);
   });
 });
+
+// Every stop carries the ignition events of its own point range (§3 rule 1,
+// "engine events"): the owner asked to tell a truck waiting at a red light-ish
+// halt from a truck whose driver switched off and walked away, and the answer is
+// per-stop, not per-day.
+describe("segment — every stop carries its engine events (§3 rule 1)", () => {
+  const centre = { lat: HFVILLE.lat, lon: HFVILLE.lon };
+
+  it("should fill offAt, onAt and offS from the stop's own fixes", () => {
+    const points = [
+      pt(T0, centre, { voltage: 13.8 }), // arrives with the engine running
+      pt(T0 + 60, centre, { voltage: 12.7 }), // switched off
+      pt(T0 + 120, centre, { voltage: 12.7 }),
+      pt(T0 + 180, centre, { voltage: 13.9 }), // restarted
+      pt(T0 + 240, centre, { voltage: 13.9 }),
+    ];
+    const { stops } = segment(points, SITES, RULES);
+    expect(stops).toHaveLength(1);
+    expect(stops[0]!.engine).toEqual({ kind: "parked", offAt: T0 + 60, onAt: T0 + 180, offS: 120 });
+    expect(stops[0]!.engineOnS).toBe(120); // unchanged, and a different question
+  });
+
+  it("should call a stop the truck idled through RUNNING, with no off time", () => {
+    const idling = parked(T0, centre, 6, 60, { voltage: 13.8 });
+    const { stops } = segment(idling, SITES, RULES);
+    expect(stops[0]!.engine).toEqual({ kind: "running", offAt: null, onAt: null, offS: 0 });
+  });
+
+  it("should give a day with no voltage at all an unknown engine, never parked", () => {
+    const { stops } = segment(parked(T0, centre, 6, 60), SITES, RULES);
+    expect(stops[0]!.engine).toEqual({ kind: "unknown", offAt: null, onAt: null, offS: 0 });
+  });
+
+  it("should give the virtual book-ends an unknown engine — they are not parked time", () => {
+    const points = Array.from({ length: 6 }, (_, i) =>
+      pt(T0 + i * 120, lerp(HF, HFVILLE, i / 6), { speed: 20, voltage: 13.8 }),
+    );
+    const { stops } = segment(points, SITES, RULES);
+    expect(stops.map((s) => s.virtual)).toEqual(["track-start", "track-end"]);
+    for (const s of stops) expect(s.engine).toEqual({ kind: "unknown", offAt: null, onAt: null, offS: 0 });
+  });
+
+  it("should read the MERGED range, so a yard shuffle's restart is inside the stop", () => {
+    // The same 200 m shuffle rule 2 merges: parked engine-off, one fix in motion
+    // at 13.8 V, parked engine-off again. The events must span both runs — a
+    // range covering only the first would report 300 s off, not 660. `onAt` is
+    // still null: the shuffle's restart is not the last off-run's end, because
+    // the driver switched off again on arrival and never came back.
+    const points = [
+      ...parked(T0, centre, 6, 60, { voltage: 12.7 }),
+      pt(T0 + 360, northOf(centre, 200), { speed: 12, voltage: 13.8 }),
+      ...parked(T0 + 420, northOf(centre, 200), 6, 60, { voltage: 12.7 }),
+    ];
+    const { stops } = segment(points, SITES, RULES);
+    expect(stops).toHaveLength(1);
+    expect(stops[0]!.engine).toEqual({ kind: "parked", offAt: T0, onAt: null, offS: 660 });
+  });
+});

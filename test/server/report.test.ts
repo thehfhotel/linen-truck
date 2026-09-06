@@ -6,7 +6,16 @@ import { pointFromRow } from "../../src/domain/sinotrackRow.ts";
 import { summarizeDay } from "../../src/domain/summary.ts";
 import { unknownStopText, detourText, outsideHoursText } from "../../src/shared/labels.ts";
 import { loadRules, loadSites } from "../../src/server/siteConfig.ts";
-import { bangkokStamp, buildDayReport, hhmm, km1, minutesOf, ratio2, summaryOnly } from "../../src/server/report.ts";
+import {
+  bangkokStamp,
+  buildDayReport,
+  hhmm,
+  km1,
+  minutesOf,
+  ratio2,
+  summaryOnly,
+  type ReportFinding,
+} from "../../src/server/report.ts";
 import { HF, HFVILLE, bkk, lerp, parked, pt } from "../domain/support.ts";
 import rawRows from "../fixtures/2026-09-05.raw.json";
 
@@ -62,7 +71,7 @@ describe("formatting", () => {
 
 describe("the finding sentences", () => {
   test("read as §9 spells them", () => {
-    expect(unknownStopText(4, "14:18", "14:22")).toEqual({
+    expect(unknownStopText(4, "14:18", "14:22", "unknown")).toEqual({
       th: "จอดที่ไม่รู้จัก 4 นาที (14:18–14:22)",
       en: "Unknown stop 4 min (14:18–14:22)",
     });
@@ -70,6 +79,21 @@ describe("the finding sentences", () => {
       "Detour HF Hotel → HF Ville 6.7 km (normally 4.9 km, 1.38×)",
     );
     expect(outsideHoursText("08:12", "08:40", 3.1).th).toBe("วิ่งนอกเวลางาน 08:12–08:40 ระยะ 3.1 กม.");
+  });
+
+  test("an unknown stop says what the engine was doing, and says nothing when it cannot tell", () => {
+    // The owner's wording (2026-09-06): a halt with the engine running is not
+    // the same event as a truck parked up, and the sentence must say which.
+    expect(unknownStopText(19, "14:27", "14:47", "running")).toEqual({
+      th: "จอดที่ไม่รู้จัก 19 นาที (14:27–14:47) · เครื่องติด",
+      en: "Unknown stop 19 min (14:27–14:47), engine running",
+    });
+    expect(unknownStopText(19, "14:27", "14:47", "parked")).toEqual({
+      th: "จอดที่ไม่รู้จัก 19 นาที (14:27–14:47) · ดับเครื่อง",
+      en: "Unknown stop 19 min (14:27–14:47), engine off",
+    });
+    // No voltage, no claim — the sentence is exactly what it was before.
+    expect(unknownStopText(4, "14:18", "14:22", "unknown").th).toBe("จอดที่ไม่รู้จัก 4 นาที (14:18–14:22)"); // no suffix when the ignition is unreadable
   });
 });
 
@@ -234,6 +258,70 @@ describe("the day-page filter fields (additive, §9)", () => {
       expect(hhmm(outside.endAt)).toBe(outside.end);
       expect(outside.endAt).toBeGreaterThanOrEqual(outside.startAt);
     }
+  });
+});
+
+// §9, additive: every stop carries its engine story, and an unknown-stop
+// finding repeats it in a form hf-mcp can print without re-deriving anything.
+describe("the engine fields (additive, §9)", () => {
+  const RAW: Record<string, string>[] = rawRows as unknown as Record<string, string>[];
+  const POINTS: Point[] = RAW.map(pointFromRow).filter((p): p is Point => p !== null);
+  const SITES = loadSites();
+  const RULES = loadRules();
+  const report = build(summarizeDay("2026-09-05", POINTS, SITES, RULES), { points: POINTS });
+
+  test("every stop reports its engine kind, and the book-end reports unknown", () => {
+    expect(report.stops!.map((s) => s.engine)).toEqual(["unknown", "parked", "parked", "parked", "parked"]);
+    expect(report.stops![0]).toMatchObject({ engineOffAt: null, engineOnAt: null, engineOffMin: 0 });
+  });
+
+  test("the engine times are Bangkok HH:MM and the off minutes are floored", () => {
+    expect(report.stops![1]).toMatchObject({
+      engine: "parked",
+      engineOffAt: "12:27",
+      engineOnAt: "13:32",
+      engineOffMin: 65,
+      engineOnMin: 5, // the existing column is untouched
+    });
+    // 510 s at HF is 8 minutes, floored like every other duration in §9.
+    expect(report.stops![2]).toMatchObject({ engineOffAt: "13:57", engineOnAt: "14:06", engineOffMin: 8 });
+    // The engine never came back inside these two stops.
+    expect(report.stops![3]).toMatchObject({ engineOffAt: "14:18", engineOnAt: null, engineOffMin: 3 });
+    expect(report.stops![4]).toMatchObject({ engineOffAt: "14:28", engineOnAt: null, engineOffMin: 43 });
+  });
+
+  test("an unknown-stop finding carries the engine kind, its off minutes and the suffixed text", () => {
+    // The fixture raises none (§3), so both readings are proven on the synthetic
+    // day the stopIndex test uses: five minutes at nowhere, once switched off and
+    // once idling.
+    const T = bkk("2026-09-03", "12:00:00");
+    const nowhere = lerp(HF, HFVILLE, 0.5);
+    const day = (nowhereVolts: number): Point[] => [
+      ...parked(T, HF, 11, 60, { voltage: 12.7 }),
+      pt(T + 660, lerp(HF, HFVILLE, 0.25), { speed: 40, voltage: 13.8 }),
+      ...parked(T + 720, nowhere, 6, 60, { voltage: nowhereVolts }),
+      pt(T + 1140, lerp(HF, HFVILLE, 0.75), { speed: 55, voltage: 13.8 }),
+      ...parked(T + 1200, HFVILLE, 11, 60, { voltage: 12.7 }),
+    ];
+    const findingFor = (volts: number) => {
+      const points = day(volts);
+      const r = build(summarizeDay("2026-09-03", points, SITES, RULES), { points });
+      const f = r.findings.find((x) => x.kind === "unknown-stop");
+      expect(f).toBeDefined();
+      return f as Extract<ReportFinding, { kind: "unknown-stop" }>;
+    };
+
+    const idling = findingFor(13.8);
+    expect(idling.engine).toBe("running");
+    expect(idling.engineOffMin).toBe(0);
+    expect(idling.text.th).toBe("จอดที่ไม่รู้จัก 5 นาที (12:12–12:17) · เครื่องติด");
+    expect(idling.text.en).toBe("Unknown stop 5 min (12:12–12:17), engine running");
+
+    const switchedOff = findingFor(12.7);
+    expect(switchedOff.engine).toBe("parked");
+    expect(switchedOff.engineOffMin).toBe(5);
+    expect(switchedOff.text.th).toBe("จอดที่ไม่รู้จัก 5 นาที (12:12–12:17) · ดับเครื่อง");
+    expect(switchedOff.text.en).toBe("Unknown stop 5 min (12:12–12:17), engine off");
   });
 });
 

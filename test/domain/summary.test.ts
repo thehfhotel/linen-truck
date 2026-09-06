@@ -141,3 +141,49 @@ describe("the 2026-09-05 fixture — findings", () => {
     expect(d!.ratio).toBeGreaterThan(RULES.detourRatio);
   });
 });
+
+// §3 rule 1, "engine events": every stop of the fixture carries the ignition
+// story of its own fixes. The times below were measured on the box from the raw
+// `Voltages=` readings inside each stop (docs/CONTRACTS.md §3).
+describe("the 2026-09-05 fixture — engine events per stop", () => {
+  it("should mark every real stop parked, and the book-end unknown", () => {
+    expect(DAY.stops.map((s) => s.engine.kind)).toEqual(["unknown", "parked", "parked", "parked", "parked"]);
+  });
+
+  it("should time the HF Ville morning stop's engine off and restart", () => {
+    // 70 minutes at HF Ville, of which 65 with the engine off: switched off three
+    // minutes after arrival, restarted at 13:32:44 (the first of the two warm-up
+    // fixes rule 1 keeps inside the stop).
+    expect(DAY.stops[1]!.engine).toEqual({
+      kind: "parked",
+      offAt: at("12:27:44"),
+      onAt: at("13:32:44"),
+      offS: 3900,
+    });
+  });
+
+  it("should show the HF unloading running for nine minutes before the engine stops", () => {
+    // 13:48–14:06 at HF: engine on until 13:57:45, off for 8.5 minutes, running
+    // again on the departure fix itself.
+    expect(DAY.stops[2]!.engine).toEqual({
+      kind: "parked",
+      offAt: at("13:57:45"),
+      onAt: at("14:06:15"),
+      offS: 510,
+    });
+  });
+
+  it("should leave onAt null where the engine never came back inside the stop", () => {
+    expect(DAY.stops[3]!.engine).toEqual({ kind: "parked", offAt: at("14:18:45"), onAt: null, offS: 210 });
+    expect(DAY.stops[4]!.engine).toEqual({ kind: "parked", offAt: at("14:28:13"), onAt: null, offS: 2583 });
+  });
+
+  it("should keep engineOnS and the engine events answering their own questions", () => {
+    // Both read the raw voltage; they differ only in the null rule (engineOnS lets
+    // a null fix count to nothing, offS carries the previous state), so on this
+    // fixture — no null-voltage fix inside any stop — they sum to the duration.
+    expect(DAY.stops[1]!.engineOnS).toBe(300);
+    expect(DAY.stops[1]!.engine.offS).toBe(3900);
+    expect(DAY.stops[1]!.depart - DAY.stops[1]!.arrive).toBe(4200);
+  });
+});

@@ -28,6 +28,7 @@ import {
   unknownStopText,
   type FindingKind,
   type L,
+  type StopEngineKind,
 } from "../shared/labels.ts";
 import type { DeviceStatus, PollLogEntry } from "./db.ts";
 
@@ -126,6 +127,17 @@ export interface ReportStop {
   lon: number;
   mapUrl: string;
   engineOnMin: number;
+  /**
+   * The ignition inside the stop (§3 rule 1, "engine events"), additive to §9:
+   * `parked` if the engine was ever switched off here, `running` if it never was,
+   * `unknown` with no voltage to read (and always on the two virtual book-ends).
+   */
+  engine: StopEngineKind;
+  /** Bangkok `HH:MM` of the ignition going off / coming back; null when there is none. */
+  engineOffAt: string | null;
+  engineOnAt: string | null;
+  /** Minutes with the engine off, floored like every other duration in §9. */
+  engineOffMin: number;
   /** Present only for the two synthetic day-edge stops (§3 rule 3). */
   virtual?: "track-start" | "track-end";
 }
@@ -150,6 +162,9 @@ export type ReportFinding =
       end: string;
       /** Index into `DayReport.stops`, additive (§9) — what the day-page map selects. */
       stopIndex: number;
+      /** The stop's ignition state, additive (§9); `text` already says it in words. */
+      engine: StopEngineKind;
+      engineOffMin: number;
     }
   | {
       kind: "detour";
@@ -238,6 +253,10 @@ function toStop(stop: Stop): ReportStop {
     lon: coord5(stop.lon),
     mapUrl: mapUrl(stop.lat, stop.lon),
     engineOnMin: minutesOf(stop.engineOnS),
+    engine: stop.engine.kind,
+    engineOffAt: stop.engine.offAt === null ? null : hhmm(stop.engine.offAt),
+    engineOnAt: stop.engine.onAt === null ? null : hhmm(stop.engine.onAt),
+    engineOffMin: minutesOf(stop.engine.offS),
   };
   if (stop.virtual !== undefined) out.virtual = stop.virtual;
   return out;
@@ -273,12 +292,14 @@ function toFinding(finding: Finding, sites: readonly Site[], stops: readonly Sto
     const end = hhmm(finding.depart);
     return {
       kind: "unknown-stop",
-      text: unknownStopText(minutes, start, end),
+      text: unknownStopText(minutes, start, end, finding.engine),
       mapUrl: mapUrl(finding.lat, finding.lon),
       minutes,
       start,
       end,
       stopIndex: findStopIndex(stops, finding.arrive, finding.depart),
+      engine: finding.engine,
+      engineOffMin: minutesOf(finding.engineOffS),
     };
   }
   if (finding.kind === "detour") {

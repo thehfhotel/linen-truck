@@ -57,6 +57,28 @@ function tripRow(trip: ReportTrip, sites: readonly Site[]): string {
 </tr>`;
 }
 
+/**
+ * `จอด/ดับเครื่อง` or `จอด/เครื่องติด` next to the place — the owner's own words
+ * for the distinction he asked for (2026-09-06): a truck parked up with the
+ * driver gone reads differently from one merely halted with the engine running.
+ * A stop whose fixes carry no voltage claims neither, and the two virtual
+ * book-ends never carry one: they are a single fix, not parked time.
+ */
+function engineBadge(stop: ReportStop): string {
+  const label =
+    stop.engine === "parked" ? LABELS.stopParked : stop.engine === "running" ? LABELS.stopRunning : null;
+  if (label === null) return "";
+  return ` <span class="badge engine-${escapeHtml(stop.engine)}" title="${escapeHtml(pair(label))}">${escapeHtml(label.th)}</span>`;
+}
+
+/** `12:27 → 13:32`, `12:27 →` while the engine never came back, `—` with no off event. */
+function engineTimes(stop: ReportStop): string {
+  if (stop.engineOffAt === null) return dash;
+  return stop.engineOnAt === null
+    ? `${escapeHtml(stop.engineOffAt)} →`
+    : `${escapeHtml(stop.engineOffAt)} → ${escapeHtml(stop.engineOnAt)}`;
+}
+
 function stopRow(stop: ReportStop, sites: readonly Site[], index: number): string {
   const virtualLabel =
     stop.virtual === "track-start" ? LABELS.trackStart : stop.virtual === "track-end" ? LABELS.trackEnd : null;
@@ -65,8 +87,9 @@ function stopRow(stop: ReportStop, sites: readonly Site[], index: number): strin
 <td><button type="button" class="rowlink" data-select="stop-${index}" title="${escapeHtml(pair(LABELS.showStopOnMap))}">${escapeHtml(stop.arrive)}</button></td>
 <td>${escapeHtml(stop.depart)}</td>
 <td class="num">${stop.minutes}</td>
-<td><a href="${escapeHtml(stop.mapUrl)}" rel="noreferrer noopener" target="_blank">${escapeHtml(place.th)}</a></td>
+<td><a href="${escapeHtml(stop.mapUrl)}" rel="noreferrer noopener" target="_blank">${escapeHtml(place.th)}</a>${engineBadge(stop)}</td>
 <td class="num">${stop.engineOnMin}</td>
+<td>${engineTimes(stop)}</td>
 </tr>`;
 }
 
@@ -202,7 +225,7 @@ ${
   stopRows.length === 0
     ? `<p class="none">${escapeHtml(pair(LABELS.noData))}</p>`
     : `<div class="scroll"><table>
-<thead><tr><th>${escapeHtml(LABELS.colArrive.th)}</th><th>${escapeHtml(LABELS.colDepart.th)}</th><th class="num">${escapeHtml(LABELS.colMinutes.th)}</th><th>${escapeHtml(LABELS.colPlace.th)}</th><th class="num">${escapeHtml(LABELS.colEngineOn.th)}</th></tr></thead>
+<thead><tr><th>${escapeHtml(LABELS.colArrive.th)}</th><th>${escapeHtml(LABELS.colDepart.th)}</th><th class="num">${escapeHtml(LABELS.colMinutes.th)}</th><th>${escapeHtml(LABELS.colPlace.th)}</th><th class="num">${escapeHtml(LABELS.colEngineOn.th)}</th><th>${escapeHtml(LABELS.colEngineOffOn.th)}</th></tr></thead>
 <tbody>${stopRows.map((st, i) => stopRow(st, sites, i)).join("")}</tbody></table></div>`
 }
 </section>
@@ -217,7 +240,13 @@ ${chipsHtml(report, sites)}
 
   const mapData = {
     sites: sites.map((site) => ({ id: site.id, name: site.name.th, lat: site.lat, lon: site.lon, radiusM: site.radiusM })),
-    txt: { unknown: LABELS.unknownPlace.th, engineOn: LABELS.colEngineOn.th, minutes: LABELS.colMinutes.th },
+    txt: {
+      unknown: LABELS.unknownPlace.th,
+      engineOn: LABELS.colEngineOn.th,
+      minutes: LABELS.colMinutes.th,
+      stopParked: LABELS.stopParked.th,
+      stopRunning: LABELS.stopRunning.th,
+    },
   };
 
   const bodyEnd = `
@@ -399,9 +428,15 @@ const MAP_SCRIPT = `
           radius: 7, weight: 2, color: '#3b0a0a',
           fillColor: known ? '#2f855a' : '#b7791f', fillOpacity: 1
         }).addTo(map);
+        // The same badge the stops table shows, plus the ignition times when there
+        // are any — a marker the owner tapped from the findings list must answer
+        // "was anybody in the cab?" without sending him back to the table.
+        var badge = st.engine === 'parked' ? txt.stopParked : st.engine === 'running' ? txt.stopRunning : '';
+        var times = st.engineOffAt ? esc(st.engineOffAt) + (st.engineOnAt ? ' \u2192 ' + esc(st.engineOnAt) : ' \u2192') : '';
         marker.bindPopup(
           '<b>' + esc(known ? st.site : txt.unknown) + '</b><br>' +
-          esc(st.arrive) + '–' + esc(st.depart) + ' (' + esc(st.minutes) + ' ' + esc(txt.minutes) + ')'
+          esc(st.arrive) + '–' + esc(st.depart) + ' (' + esc(st.minutes) + ' ' + esc(txt.minutes) + ')' +
+          (badge ? '<br>' + esc(badge) + (times ? ' ' + times : '') : '')
         );
         stopMarkers.push(marker);
         stopCoords.push([st.lat, st.lon]);

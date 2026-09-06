@@ -71,13 +71,15 @@ export interface Site { id: string; name: { th: string; en: string }; lat: numbe
 export interface Rules { stopRadiusM: number; minStopS: number; mergeHopM: number; unknownStopMinS: number; movingKmh: number;
   schedule: { start: string; end: string }; detourRatio: number; referenceKm: Record<string, number>; engineOnVolts: number;
   engineHoldS: number; jitterRadiusM: number }
+export interface StopEngine { kind: 'parked' | 'running' | 'unknown'; offAt: number | null; onAt: number | null; offS: number }
 export interface Stop { arrive: number; depart: number; lat: number; lon: number; siteId: string | null;
-  engineOnS: number; virtual?: 'track-start' | 'track-end' }
+  engineOnS: number; engine: StopEngine; virtual?: 'track-start' | 'track-end' }
 export interface Trip { n: number; start: number; end: number; from: { lat: number; lon: number; siteId: string | null };
   to: { lat: number; lon: number; siteId: string | null }; km: number; maxKmh: number; pointCount: number; path: Point[] }
 export interface Leg { tripNs: number[]; fromSiteId: string; toSiteId: string; start: number; end: number; km: number; viaUnknownStops: number }
 export type Finding =
-  | { kind: 'unknown-stop'; arrive: number; depart: number; lat: number; lon: number; durationS: number }
+  | { kind: 'unknown-stop'; arrive: number; depart: number; lat: number; lon: number; durationS: number;
+      engine: StopEngine['kind']; engineOffS: number }
   | { kind: 'detour'; leg: Leg; referenceKm: number; ratio: number }
   | { kind: 'outside-hours'; start: number; end: number; km: number }
 export interface DaySummary { ymd: string; pointCount: number; firstPointAt: number | null; lastPointAt: number | null;
@@ -91,6 +93,7 @@ export function siteAt(p: {lat:number;lon:number}, sites: Site[]): Site | null  
 export function mapUrl(lat: number, lon: number): string  // https://www.google.com/maps?q=<lat5>,<lon5>
 // src/domain/engine.ts
 export function engineOnMask(points: Point[], rules: Rules): boolean[]   // one flag per point, in order
+export function engineEvents(points: readonly Point[], i0: number, i1: number, rules: Rules): StopEngine  // one stop's ignition, RAW voltage
 // src/domain/segment.ts
 export function cleanPoints(raw: Point[]): Point[]      // sort by t, drop duplicate t (keep first), drop lat==0||lon==0
 export function segment(points: Point[], sites: Site[], rules: Rules): { stops: Stop[]; trips: Trip[]; legs: Leg[] }
@@ -144,13 +147,27 @@ Rules (proven in the Python prototype, 2026-09-05):
    pre-rule-1 behaviour. That is an improvement, not a regression: a voltage-less day loses the engine signal, not the
    speed signal, and a settled point 300 m from a settled anchor is parked scatter there for the same reason it is here.
    `siteId` = `siteAt(anchor)`. `engineOnS` = sample-and-hold: the sum of the gaps between consecutive fixes of the run whose EARLIER fix has voltage ≥ `engineOnVolts` (a null voltage never counts; 0 if no voltage data).
+   ENGINE EVENTS (`engineEvents`, `Stop.engine`, owner decision 2026-09-06 — "mark stop with engine stop/start too, differentiate
+   between traffic and stops"): every stop also carries what the IGNITION did inside it, read from the RAW voltage of the stop's own
+   fixes (after rule 2, over the MERGED range) and NOT from the held mask — the hold exists so a dip under load does not read as an
+   engine stop while the truck moves, and a 300 s hold would swallow the very event this reports. Walk the stop's fixes in order: a
+   fix with a voltage is ON at or above `engineOnVolts` and OFF below it; a NULL fix carries the previous fix's state (null is
+   unknown, never "off"), and a LEADING null stretch — before the stop has seen any voltage — has no state at all and counts to
+   nothing. `kind` = `unknown` when no fix of the range carries a voltage, `running` when every reading is on, `parked` as soon as
+   one reading is off. `offAt` = the time of the first fix reading off (the arrival fix itself when the truck came in already
+   switched off), `onAt` = the first ON reading AFTER THE LAST off-run (so an engine that cycled twice reports the restart the truck
+   left on), null while the engine was still off at the stop's last fix; both null when `kind` ≠ `parked`. `offS` = seconds in the
+   off state, sample-and-hold exactly like `engineOnS`. The two VIRTUAL book-ends get `{ kind: 'unknown', offAt: null, onAt: null,
+   offS: 0 }` — a single fix is not parked time. NO new threshold and NO new finding kind: this is reported, never a trigger.
 2. Merge consecutive stops with the same `siteId` (not null) when the hop between their anchors < `mergeHopM` AND the haversine travel over the points between them is also < `mergeHopM` (yard shuffle only — an out-and-back run with no far-end stop is never swallowed).
 3. Virtual stop at the first point (`track-start`) if the day does not begin inside a stop; virtual `track-end` at the last point if
    the day does not end inside a stop (still moving).
 4. TRIP n = points from stop[i].depart index to stop[i+1].arrive index; km = haversine sum; maxKmh = max speed.
 5. LEG = consecutive trips merged through stops whose `siteId` is null, so each leg runs known site → known site.
    Trips that begin or end at a virtual stop or never reach a known site form no leg.
-6. Findings: `unknown-stop` for a non-virtual stop with `siteId === null` and duration ≥ `unknownStopMinS`;
+6. Findings: `unknown-stop` for a non-virtual stop with `siteId === null` and duration ≥ `unknownStopMinS` — the trigger is
+   UNCHANGED by the engine events; the finding merely copies the stop's `engine.kind` and `engine.offS` (as `engine` / `engineOffS`)
+   so its sentence can say whether the driver switched off or sat there with the engine running;
    `detour` for a leg whose `referenceKm[sorted pair]` exists and `km / referenceKm > detourRatio`;
    `outside-hours` for maximal runs of MOVING points — speed > `movingKmh` AND ENGINE-ON, because a parked tracker's
    speed is jitter, not a journey — with Bangkok wall-clock outside [schedule.start, schedule.end); runs split when the
@@ -175,6 +192,16 @@ centre, inside the 600 m fence, and its 381 m hop to the 14:26 stop is ≥ `merg
 0 × outside-hours. Trip 1 (unlabelled start → hfville, 3.48 km) forms no leg. `roundTrips` 1, `timeAtSiteS`
 { hfville 7110, hf 1080 }. The morning stop ends at 13:34:15, the last fix before the truck reports movement: the
 13:32:44 and 13:34:15 engine restarts are SETTLED (speed 0), so rule 1 holds them as scatter, not as a departure.
+ENGINE EVENTS on the same fixture (derived by the code, and matching the raw voltages measured on the box): the `track-start`
+book-end is `unknown`, every real stop is `parked`, and the four are
+`{ offAt 12:27:44, onAt 13:32:44, offS 3900 }` (HF Ville 12:24–13:34 — 65 of its 70 minutes with the engine off, restarted on the
+first of the two warm-up fixes rule 1 keeps inside the stop),
+`{ offAt 13:57:45, onAt 14:06:15, offS 510 }` (HF 13:48–14:06 — nine and a half minutes unloading with the engine running, then
+switched off, running again on the departure fix itself),
+`{ offAt 14:18:45, onAt null, offS 210 }` and `{ offAt 14:28:13, onAt null, offS 2583 }` (the two afternoon HF Ville stops, where
+the engine never came back inside the stop). `engineOnS` is unchanged: 300 s on with 3900 s off over the 4200 s morning stop. Both
+read the same raw voltage and differ only in the null rule — `engineOnS` lets a null-voltage fix count to nothing, `offS`
+carries the previous state through it — so the two diverge only on a stop with null-voltage fixes, which this fixture has none of.
 
 ## 4. SinoTrack client (`src/server/sinotrack.ts`) — port of the proven Python client
 - `POST {server}/APP/AppJson.asp` form-urlencoded fields `strAppID, strUser, nTimeStamp, strRandom, strSign, strToken`; no cookies.
@@ -230,8 +257,10 @@ Invalid ymd → 400 JSON `{error:'bad-date'}`. Unknown route → 404.
 Day page: header (date, prev/next day, week link), device line (last seen, voltage, moving/parked), summary tiles
 (km, trips, round trips HF↔HF Ville, first departure, last arrival, time at HF, time at HF Ville), **findings** list first
 (unknown stops with Google Maps link + duration; detours with leg, km vs reference; outside-hours ranges), trips table
-(n, start→end, minutes, km, max km/h, from → to), stops table (arrive–depart, minutes, site or map link, engine-on minutes),
-a Leaflet map (CDN, integrity-pinned) drawing the day's path + site circles + stop markers, fed by `/api/day/:ymd`.
+(n, start→end, minutes, km, max km/h, from → to), stops table (arrive–depart, minutes, site or map link + the engine badge `จอด/ดับเครื่อง` / `จอด/เครื่องติด` — none when the
+engine state is unknown, engine-on minutes, engine off → on times `12:27 → 13:32` / `12:27 →` / `—`),
+a Leaflet map (CDN, integrity-pinned) drawing the day's path + site circles + stop markers (a stop popup repeats the badge and
+the engine times), fed by `/api/day/:ymd`.
 Week page: one row per day (date link, km, trips, round trips, first departure, last arrival, findings by kind, points).
 Labels live in `src/shared/labels.ts` as `{ th, en }` pairs (`L`), rendered as "ไทย · English".
 Branding: HF One staff burgundy like feedback's /staff (not the crimson guest palette). Mobile-first, works on a phone.
@@ -244,9 +273,11 @@ Branding: HF One staff burgundy like feedback's /staff (not the crimson guest pa
                "timeAtSiteMin": { "hf": 18, "hfville": 118 }, "pointCount": 82, "findingCount": { "unknown-stop": 0, "detour": 1, "outside-hours": 0 } },
   "trips": [ { "n": 1, "start": "12:11", "end": "12:24", "minutes": 13, "km": 3.5, "maxKmh": 44, "from": null, "to": "hfville",
                "fromMapUrl": "…", "toMapUrl": "…" } ],
-  "stops": [ { "arrive": "12:24", "depart": "13:34", "minutes": 70, "site": "hfville", "lat": 9.12223, "lon": 99.35179, "mapUrl": "…", "engineOnMin": 5 } ],
+  "stops": [ { "arrive": "12:24", "depart": "13:34", "minutes": 70, "site": "hfville", "lat": 9.12223, "lon": 99.35179, "mapUrl": "…", "engineOnMin": 5,
+               "engine": "parked", "engineOffAt": "12:27", "engineOnAt": "13:32", "engineOffMin": 65 } ],
   "legs":  [ { "trips": [3], "from": "hf", "to": "hfville", "km": 6.7, "referenceKm": 4.9, "ratio": 1.38 } ],
-  "findings": [ { "kind": "unknown-stop", "text": { "th": "จอดที่ไม่รู้จัก 4 นาที (14:18–14:22)", "en": "Unknown stop 4 min (14:18–14:22)" }, "mapUrl": "…", "minutes": 4, "start": "14:18", "end": "14:22" },
+  "findings": [ { "kind": "unknown-stop", "text": { "th": "จอดที่ไม่รู้จัก 4 นาที (14:18–14:22) · ดับเครื่อง", "en": "Unknown stop 4 min (14:18–14:22), engine off" },
+                  "mapUrl": "…", "minutes": 4, "start": "14:18", "end": "14:22", "engine": "parked", "engineOffMin": 3 },
                 { "kind": "detour", "text": { "th": "…", "en": "…" }, "trips": [3], "from": "hf", "to": "hfville", "km": 6.7, "referenceKm": 4.9, "ratio": 1.38 },
                 { "kind": "outside-hours", "text": { "th": "…", "en": "…" }, "start": "…", "end": "…", "km": 0 } ],
   "path": [ [9.14791, 99.33564, 1788585074], … ],
@@ -255,7 +286,12 @@ Branding: HF One staff burgundy like feedback's /staff (not the crimson guest pa
 The three finding entries above are a SHAPE catalogue: the 2026-09-05 fixture itself raises only the detour (see §3).
 `/api/week` and `/feed/range` return the same objects without `trips`, `stops`, `legs`, `path` (findings kept).
 Additive since 2026-09-05 (map filtering): trips also carry `startAt`/`endAt` (epoch s), stops `arriveAt`/`departAt`,
-unknown-stop findings `stopIndex` (index into `stops`), outside-hours findings `startAt`/`endAt`. Day page selection is
+unknown-stop findings `stopIndex` (index into `stops`), outside-hours findings `startAt`/`endAt`.
+Additive since 2026-09-06 (engine events, §3 rule 1): every stop carries `engine` (`"parked" | "running" | "unknown"`),
+`engineOffAt` / `engineOnAt` (Bangkok `HH:MM` or null) and `engineOffMin` (floored like every other duration); an unknown-stop
+finding carries `engine` and `engineOffMin`, and its `text` gains the status suffix — th ` · เครื่องติด` / ` · ดับเครื่อง`,
+en `, engine running` / `, engine off`, and NO suffix when the kind is `unknown` (no voltage, no claim). `engineOnMin` is
+unchanged. hf-mcp reads `findingCount` generically and prints `text`, so nothing there needs a change. Day page selection is
 mirrored in the URL hash (`#all`, `#trip-N`, `#trip-N-M` for a detour leg, `#stop-I`) and applied on load.
 Rounding happens only in the report layer: km to 1 dp, ratio to 2 dp of the unrounded quotient, minutes floored.
 

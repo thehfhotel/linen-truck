@@ -107,6 +107,68 @@ describe("an unknown-stop finding and its stop row", () => {
   });
 });
 
+// The engine badge and the engine-times column (owner ask, 2026-09-06): every
+// stop row says whether the truck was parked with the engine off or merely
+// halted with it running, and when the ignition went off and came back.
+describe("the stops table's engine badge and times", () => {
+  const RAW: Record<string, string>[] = rawRows as unknown as Record<string, string>[];
+  const POINTS: Point[] = RAW.map(pointFromRow).filter((p): p is Point => p !== null);
+  const fixture = pageFor("2026-09-05", POINTS);
+
+  test("the stops table gains an engine off → on column", () => {
+    expect(fixture).toContain("ดับ → ติดเครื่อง");
+  });
+
+  test("the morning HF Ville stop shows both its engine times", () => {
+    expect(fixture).toContain("12:27 → 13:32");
+  });
+
+  test("a stop the engine never restarted in shows the off time and an open arrow", () => {
+    expect(fixture).toContain("14:28 →</td>");
+  });
+
+  test("every parked stop of the fixture carries the parked badge", () => {
+    // Scoped to the stops table: the map-data blob ships BOTH badge words to the
+    // client script, so a whole-page `not.toContain` would prove nothing.
+    const from = fixture.indexOf('<tr data-stop="0"');
+    const stopsTable = fixture.slice(from, fixture.indexOf("</tbody>", from));
+    const badges = stopsTable.match(/จอด\/ดับเครื่อง/g) ?? [];
+    expect(badges.length).toBeGreaterThanOrEqual(4); // the day's four real stops
+    expect(stopsTable).not.toContain("จอด/เครื่องติด"); // nothing idled through a stop
+  });
+
+  test("the virtual book-end gets no badge and no engine times", () => {
+    const firstRow = fixture.slice(fixture.indexOf('<tr data-stop="0"'), fixture.indexOf('<tr data-stop="1"'));
+    expect(firstRow).not.toContain("จอด/ดับเครื่อง");
+    expect(firstRow).not.toContain("จอด/เครื่องติด");
+    expect(firstRow).toContain("—");
+  });
+
+  test("a stop the truck idled through carries the engine-running badge instead", () => {
+    // The synthetic 2026-09-03 day: HF and HF Ville parked at 12.7 V, the stop at
+    // nowhere idling at 13.8 V.
+    const T = bkk("2026-09-03", "12:00:00");
+    const html = pageFor("2026-09-03", [
+      ...parked(T, HF, 11, 60, { voltage: 12.7 }),
+      pt(T + 660, lerp(HF, HFVILLE, 0.25), { speed: 40, voltage: 13.8 }),
+      ...parked(T + 720, lerp(HF, HFVILLE, 0.5), 6, 60, { voltage: 13.8 }),
+      pt(T + 1140, lerp(HF, HFVILLE, 0.75), { speed: 55, voltage: 13.8 }),
+      ...parked(T + 1200, HFVILLE, 11, 60, { voltage: 12.7 }),
+    ]);
+    expect(html).toContain("จอด/เครื่องติด");
+    expect(html).toContain("จอด/ดับเครื่อง");
+    // …and the finding sentence says it too (§9 text, one source for both).
+    expect(html).toContain("เครื่องติด</span>");
+  });
+
+  test("the map script is told both badge words, so a popup can show them", () => {
+    expect(fixture).toContain("จอด/ดับเครื่อง");
+    const mapData = fixture.slice(fixture.indexOf('id="map-data"'));
+    expect(mapData).toContain("stopParked");
+    expect(mapData).toContain("stopRunning");
+  });
+});
+
 describe("a day with no points", () => {
   const html = pageFor("2026-09-04", []);
 

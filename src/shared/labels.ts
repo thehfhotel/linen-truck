@@ -31,6 +31,9 @@ export const pair = (l: L): string => `${l.th} · ${l.en}`;
 /** The three finding kinds, spelled here so this file needs no domain import. */
 export type FindingKind = "unknown-stop" | "detour" | "outside-hours";
 
+/** A stop's ignition state (`StopEngine["kind"]`), spelled here for the same reason. */
+export type StopEngineKind = "parked" | "running" | "unknown";
+
 // ── chrome ──────────────────────────────────────────────────────────────────
 
 export const LABELS = {
@@ -88,6 +91,10 @@ export const LABELS = {
   colDepart: { th: "ออก", en: "Depart" },
   colPlace: { th: "สถานที่", en: "Place" },
   colEngineOn: { th: "ติดเครื่อง (นาที)", en: "Engine on (min)" },
+  colEngineOffOn: { th: "ดับ → ติดเครื่อง", en: "Engine off → on" },
+  /** The two stop badges the owner asked for (2026-09-06): parked up vs merely halted. */
+  stopParked: { th: "จอด/ดับเครื่อง", en: "Parked, engine off" },
+  stopRunning: { th: "จอด/เครื่องติด", en: "Stopped, engine running" },
   unknownPlace: { th: "ไม่รู้จัก", en: "Unknown" },
   trackStart: { th: "เริ่มบันทึก", en: "Track start" },
   trackEnd: { th: "จบบันทึก", en: "Track end" },
@@ -124,11 +131,26 @@ export const FINDING_KIND: Record<FindingKind, L> = {
 // Numbers arrive already rounded and already formatted as Bangkok `HH:MM`, so
 // these are pure string assembly and a test can pin them character for character.
 
-/** `จอดที่ไม่รู้จัก 4 นาที (14:18–14:22)` · `Unknown stop 4 min (14:18–14:22)` */
-export const unknownStopText = (minutes: number, start: string, end: string): L => ({
-  th: `จอดที่ไม่รู้จัก ${minutes} นาที (${start}–${end})`,
-  en: `Unknown stop ${minutes} min (${start}–${end})`,
-});
+/**
+ * `จอดที่ไม่รู้จัก 4 นาที (14:18–14:22)` · `Unknown stop 4 min (14:18–14:22)`,
+ * with the engine status appended when the stop has one:
+ * `… · เครื่องติด` / `…, engine running`, `… · ดับเครื่อง` / `…, engine off`.
+ *
+ * A stop whose fixes carry no voltage says nothing — the sentence must not claim
+ * an ignition state it cannot read, so `unknown` renders exactly as before.
+ */
+export const unknownStopText = (
+  minutes: number,
+  start: string,
+  end: string,
+  engine: StopEngineKind,
+): L => {
+  const th = `จอดที่ไม่รู้จัก ${minutes} นาที (${start}–${end})`;
+  const en = `Unknown stop ${minutes} min (${start}–${end})`;
+  if (engine === "running") return { th: `${th} · เครื่องติด`, en: `${en}, engine running` };
+  if (engine === "parked") return { th: `${th} · ดับเครื่อง`, en: `${en}, engine off` };
+  return { th, en };
+};
 
 /** `อ้อมทาง HF Ville → โรงแรม HF 7.4 กม. (ปกติ 4.9 กม., 1.51 เท่า)` */
 export const detourText = (from: L, to: L, km: number, referenceKm: number, ratio: number): L => ({

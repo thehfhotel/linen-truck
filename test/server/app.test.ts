@@ -233,6 +233,23 @@ describe("/api/day/:ymd", () => {
     expect(detour.referenceKm).toBe(4.9);
     expect(detour.ratio).toBeGreaterThan(1.25);
 
+    // §9, additive: the engine story of every stop travels with the feed, so
+    // hf-mcp never re-derives it from the raw voltages.
+    expect(body.stops.map((s: { engine: string }) => s.engine)).toEqual([
+      "unknown",
+      "parked",
+      "parked",
+      "parked",
+      "parked",
+    ]);
+    expect(body.stops[1]).toMatchObject({
+      engine: "parked",
+      engineOffAt: "12:27",
+      engineOnAt: "13:32",
+      engineOffMin: 65,
+    });
+    expect(body.stops[4]).toMatchObject({ engineOffAt: "14:28", engineOnAt: null });
+
     expect(body.dataQuality).toEqual({ lastPollAt: null, lastPollOk: null, note: "no-poll-yet" });
   });
 

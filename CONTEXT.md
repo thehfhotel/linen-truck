@@ -13,7 +13,10 @@ the day into stops/trips/legs against the two known sites, and flags what a
 manager actually cares about:
 
 - **unknown stops** — the truck parked somewhere that isn't HF or HF Ville
-  for more than a few minutes,
+  for more than a few minutes, each one saying whether the engine was switched
+  off there or left running (owner, 2026-09-06: a halt in traffic and a truck
+  parked up are different events at the same coordinates — same threshold, more
+  words),
 - **detours** — a leg between the two sites came in far longer than the
   known road distance,
 - **outside-hours runs** — the truck was moving outside the scheduled
