@@ -37,9 +37,17 @@ env:
   REGISTRY: ghcr.io
   IMAGE: ghcr.io/thehfhotel/linen-truck
 
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: false
+
 jobs:
   ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -66,16 +74,17 @@ jobs:
   deploy-hfville:
     name: Deploy to the HF Ville box
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [ci]
     # Stays skipped (not red) until the box shim, the deploy key and the secrets
     # all exist: flip the TRUCK_DEPLOY_ENABLED repository variable to "1".
     if: vars.TRUCK_DEPLOY_ENABLED == '1'
-    permissions:
-      contents: read
-      packages: write
     concurrency:
       group: deploy-hfville-linen-truck
       cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
     env:
       # Empty for a push; a sha for a rollback dispatch. Read through the env
       # context so the `if:` below is reliable on both event types.

@@ -13,16 +13,22 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
   schedule:
     - cron: "0 23 * * 0" # weekly, Monday 06:00 Asia/Bangkok
 
 permissions:
   contents: read
 
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
 jobs:
   trivy:
     name: Trivy scan
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5.0.0
 
