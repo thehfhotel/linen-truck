@@ -79,6 +79,9 @@ jobs:
     # Stays skipped (not red) until the box shim, the deploy key and the secrets
     # all exist: flip the TRUCK_DEPLOY_ENABLED repository variable to "1".
     if: vars.TRUCK_DEPLOY_ENABLED == '1'
+    concurrency:
+      group: deploy-hfville-linen-truck
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write

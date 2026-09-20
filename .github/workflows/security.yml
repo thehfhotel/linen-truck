@@ -12,10 +12,8 @@ name: security
 on:
   push:
     branches: [main]
-    paths-ignore: ["docs/**", "**/*.md"]
   pull_request:
     branches: [main]
-    paths-ignore: ["docs/**", "**/*.md"]
   schedule:
     - cron: "0 23 * * 0" # weekly, Monday 06:00 Asia/Bangkok
 
