@@ -289,7 +289,10 @@ map chips a line `กำลังดู · Viewing: …` (`<p class="viewing" id
 30 ก.ย. 13:08` (`30 ก.ย. 13:21–13:46` when both ends share a date, `… – ยังจอดอยู่` while parked, `ก่อน ` before an open arrival). The server
 precomputes one string per rendered `data-select` key into the page's `map-data` JSON (`views: { [key]: string }`, always with `all`, which is also the
 no-JS initial text); the ES5 map script sets `textContent` from it on every selection change, the hash applied on load included, and falls back to
-`views.all` for an unknown key.
+`views.all` for an unknown key. The same `map-data` carries `stopText: [{ place, range, engine, past }]`, one entry per stop in table order — the place label, the Viewing
+line's range, the dated engine text (plain, unescaped, empty with no off event) and `past` (the `*` rule, decided once on the server) — and a stop
+marker's popup is built from it (`<b>place</b><br>range (minutes[*] นาที)` plus the badge and engine line), so the popup, the table and the Viewing line
+never disagree; a missing entry falls back to the day-clipped popup.
 Week page: one row per day (date link, km, trips, round trips, first departure, last arrival, findings by kind, points).
 Labels live in `src/shared/labels.ts` as `{ th, en }` pairs (`L`), rendered as "ไทย · English".
 Branding: HF One staff burgundy like feedback's /staff (not the crimson guest palette). Mobile-first, works on a phone.

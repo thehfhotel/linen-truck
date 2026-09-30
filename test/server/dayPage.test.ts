@@ -402,10 +402,15 @@ describe("the Viewing line and the map-data views", () => {
 // ── the client script, run against a fake DOM ────────────────────────────────
 
 /** A permissive stand-in for Leaflet: every call answers with itself, except the few that decide flow. */
-function leafletStub(): unknown {
+function leafletStub(popups: string[] = []): unknown {
   const stub: unknown = new Proxy(function () {}, {
     get: (_t, key) => {
       if (typeof key === "symbol" || key === "then") return undefined;
+      if (key === "bindPopup")
+        return (html: unknown) => {
+          popups.push(String(html));
+          return stub;
+        };
       if (key === "isValid") return () => false;
       if (key === "getZoom") return () => 10;
       return stub;
@@ -420,10 +425,24 @@ interface FakeNode {
   click: (() => void)[];
 }
 
-async function runMapScript(opts: { hash: string; views: Record<string, string>; selectKeys: string[] }) {
+async function runMapScript(opts: {
+  hash: string;
+  views: Record<string, string>;
+  selectKeys: string[];
+  /** The `stopText` of map-data, when the page has it. */
+  stopText?: unknown[];
+  /** The `stops` `/api/day` answers with. */
+  stops?: unknown[];
+}) {
+  const popups: string[] = [];
   const viewEl = { textContent: "ทั้งวัน · initial" };
   const mapEl = { getAttribute: (k: string) => (k === "data-ymd" ? "2026-09-05" : null) };
-  const dataEl = { textContent: JSON.stringify({ sites: [], txt: {}, views: opts.views }) };
+  const dataEl = { textContent: JSON.stringify({
+      sites: [],
+      txt: { unknown: "ไม่รู้จัก", minutes: "นาที", stopParked: "จอด/ดับเครื่อง", stopRunning: "จอด/เครื่องติด" },
+      views: opts.views,
+      ...(opts.stopText ? { stopText: opts.stopText } : {}),
+    }) };
   const nodes: FakeNode[] = opts.selectKeys.map((k) => ({ attrs: { "data-select": k }, click: [] }));
   const listeners: Record<string, (() => void)[]> = {};
   const win = {
@@ -440,17 +459,18 @@ async function runMapScript(opts: { hash: string; views: Record<string, string>;
           }))
         : [],
   };
-  const fetchStub = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ path: [], trips: [], stops: [] }) });
+  const fetchStub = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ path: [], trips: [], stops: opts.stops ?? [] }) });
   new Function("document", "window", "L", "fetch", "history", "console", MAP_SCRIPT)(
     doc,
     win,
-    leafletStub(),
+    leafletStub(popups),
     fetchStub,
     { replaceState() {} },
     { error() {} },
   );
   for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
   return {
+    popups,
     text: () => viewEl.textContent,
     click: (key: string) => nodes.find((n) => n.attrs["data-select"] === key)!.click.forEach((f) => f()),
     hashchange: (hash: string) => {
@@ -517,5 +537,86 @@ describe("the Viewing line's client script", () => {
   test("a page whose map-data predates views leaves the server-rendered text alone", async () => {
     const run = await runMapScript({ hash: "#trip-2", views: {} as Record<string, string>, selectKeys: [] });
     expect(run.text()).toBe("ทั้งวัน · initial");
+  });
+});
+
+// ── the stop popup speaks the same words as the table and the Viewing line ────
+
+describe("stopText in map-data", () => {
+  const html = pageFor("2026-09-05", RAW_POINTS, (spans) => {
+    spans[1] = { ...spans[1]!, arriveAt: bkk("2026-09-04", "23:30:00"), arriveOpen: true };
+    spans[4] = { ...spans[4]!, departAt: null };
+  });
+  const data = mapDataOf(html) as unknown as {
+    stopText: { place: string; range: string; engine: string; past: boolean }[];
+    views: Record<string, string>;
+  };
+
+  test("one entry per stop, in the stops table's order", () => {
+    expect(data.stopText).toHaveLength(5);
+    expect(data.stopText.map((e) => e.place)).toEqual(["เริ่มบันทึก", "HF Ville", "โรงแรม HF", "HF Ville", "HF Ville"]);
+  });
+
+  test("the range is exactly the Viewing line's range", () => {
+    data.stopText.forEach((e, i) => expect(data.views[`stop-${i}`]).toBe(`${e.place} · ${e.range}`));
+  });
+
+  test("a stop carried in from the evening before, and one still parked", () => {
+    expect(data.stopText[1]!.range).toBe("ก่อน 4 ก.ย. 23:30 – 5 ก.ย. 13:34");
+    expect(data.stopText[4]!.range).toBe("5 ก.ย. 14:26 – ยังจอดอยู่");
+  });
+
+  test("past is the table's * rule, computed once on the server", () => {
+    expect(data.stopText.map((e) => e.past)).toEqual([false, true, false, false, true]);
+    // …and it agrees with the rows the table starred.
+    for (const [i, e] of data.stopText.entries()) {
+      expect(/<td class="num">\d+\*<\/td>/.test(stopRowHtml(html, i))).toBe(e.past);
+    }
+  });
+
+  test("the engine text is plain, unescaped and dated; empty with no off event", () => {
+    expect(data.stopText[1]!.engine).toBe("5 ก.ย. 12:27 → 5 ก.ย. 13:32");
+    expect(data.stopText[4]!.engine).toBe("5 ก.ย. 14:28 →");
+    expect(data.stopText[0]!.engine).toBe("");
+    for (const e of data.stopText) expect(e.engine).not.toContain("&");
+  });
+
+  test("an empty day has an empty stopText", () => {
+    expect((mapDataOf(pageFor("2026-09-04", [])) as unknown as { stopText: unknown[] }).stopText).toEqual([]);
+  });
+});
+
+describe("the stop popup, executed", () => {
+  const apiStop = { site: "hfville", lat: 9.12, lon: 99.35, engine: "parked", engineOffAt: "00:04", engineOnAt: null, arrive: "00:04", depart: "13:04", minutes: 780 };
+
+  test("uses the precomputed span text: escaped, starred when past the day, then the badge and engine line", async () => {
+    const run = await runMapScript({
+      hash: "",
+      views: { all: "x" },
+      selectKeys: [],
+      stops: [apiStop],
+      stopText: [{ place: "HF <Ville>", range: "29 ก.ย. 14:34 – 30 ก.ย. 13:04", engine: "29 ก.ย. 14:34 →", past: true }],
+    });
+    expect(run.popups).toEqual([
+      "<b>HF &lt;Ville&gt;</b><br>29 ก.ย. 14:34 – 30 ก.ย. 13:04 (780* นาที)<br>จอด/ดับเครื่อง 29 ก.ย. 14:34 →",
+    ]);
+  });
+
+  test("no star when the stop lies inside the day, no engine text when there is none", async () => {
+    const run = await runMapScript({
+      hash: "",
+      views: { all: "x" },
+      selectKeys: [],
+      stops: [{ ...apiStop, engine: "running", engineOffAt: null }],
+      stopText: [{ place: "โรงแรม HF", range: "5 ก.ย. 13:48–14:06", engine: "", past: false }],
+    });
+    expect(run.popups).toEqual(["<b>โรงแรม HF</b><br>5 ก.ย. 13:48–14:06 (780 นาที)<br>จอด/เครื่องติด"]);
+  });
+
+  test("an entry that is missing falls back to the old popup", async () => {
+    const run = await runMapScript({ hash: "", views: { all: "x" }, selectKeys: [], stops: [apiStop], stopText: [] });
+    expect(run.popups).toEqual(["<b>hfville</b><br>00:04–13:04 (780 นาที)<br>จอด/ดับเครื่อง 00:04 →"]);
+    const older = await runMapScript({ hash: "", views: { all: "x" }, selectKeys: [], stops: [apiStop] });
+    expect(older.popups).toEqual(run.popups);
   });
 });

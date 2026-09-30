@@ -77,15 +77,22 @@ function engineBadge(stop: ReportStop): string {
 const dateTimeAt = (epochS: number): string => thaiDateTime(isoAt(epochS));
 
 /**
- * `12:27 → 13:32` with dates, `12:27 →` while the engine never came back, `—` with
- * no off event. Reads the stop's SPAN values, so an ignition event that happened
- * on another day says which one.
+ * The ignition times as plain text: `12:27 → 13:32` with dates, `12:27 →` while
+ * the engine never came back, `''` with no off event. Reads the stop's SPAN
+ * values, so an ignition event that happened on another day says which one.
+ * Unescaped — the table escapes it, and the map script escapes it for its popup.
  */
-function engineTimes(stop: ReportStop): string {
-  if (stop.spanEngineOffAt === null) return dash;
-  const off = escapeHtml(dateTimeAt(stop.spanEngineOffAt));
-  return stop.spanEngineOnAt === null ? `${off} →` : `${off} → ${escapeHtml(dateTimeAt(stop.spanEngineOnAt))}`;
+function engineText(stop: ReportStop): string {
+  if (stop.spanEngineOffAt === null) return "";
+  const off = dateTimeAt(stop.spanEngineOffAt);
+  return stop.spanEngineOnAt === null ? `${off} →` : `${off} → ${dateTimeAt(stop.spanEngineOnAt)}`;
 }
+
+/** The table cell: the same text, or `—` where there is no off event. */
+const engineTimes = (stop: ReportStop): string => {
+  const text = engineText(stop);
+  return text === "" ? dash : escapeHtml(text);
+};
 
 /**
  * Does the stop's real extent reach outside what the day counted? Then its
@@ -181,12 +188,30 @@ function mapViews(report: DayReport, sites: readonly Site[]): Record<string, str
       `${f.trips.map(tripSelectLabel).join(" + ")} · ${day} ${first.start}–${last.end}`;
   }
   (report.stops ?? []).forEach((stop, i) => {
-    const virtualLabel =
-      stop.virtual === "track-start" ? LABELS.trackStart : stop.virtual === "track-end" ? LABELS.trackEnd : null;
-    const place = (virtualLabel ?? siteLabel(sites, stop.site)).th;
-    views[`stop-${i}`] = `${place} · ${stopRange(stop)}`;
+    views[`stop-${i}`] = `${stopPlace(stop, sites)} · ${stopRange(stop)}`;
   });
   return views;
+}
+
+/** A stop's place label for the Viewing line and the marker popup: the virtual label, or the site's / unknown Thai name. */
+function stopPlace(stop: ReportStop, sites: readonly Site[]): string {
+  const virtualLabel =
+    stop.virtual === "track-start" ? LABELS.trackStart : stop.virtual === "track-end" ? LABELS.trackEnd : null;
+  return (virtualLabel ?? siteLabel(sites, stop.site)).th;
+}
+
+/**
+ * What a stop's map popup says, precomputed so the script does no date maths and
+ * the popup can never disagree with the table or the Viewing line. `past` is
+ * `runsPastDay` — the table's `*` rule, decided once, here.
+ */
+function stopTexts(report: DayReport, sites: readonly Site[]): { place: string; range: string; engine: string; past: boolean }[] {
+  return (report.stops ?? []).map((stop) => ({
+    place: stopPlace(stop, sites),
+    range: stopRange(stop),
+    engine: engineText(stop),
+    past: runsPastDay(stop),
+  }));
 }
 
 /**
@@ -326,6 +351,7 @@ ${chipsHtml(report, sites)}
       stopRunning: LABELS.stopRunning.th,
     },
     views,
+    stopText: stopTexts(report, sites),
   };
 
   const bodyEnd = `
@@ -393,6 +419,7 @@ export const MAP_SCRIPT = `
     var sites = cfg.sites || [];
     var txt = cfg.txt || {};
     var views = cfg.views || {};
+    var stopText = cfg.stopText || [];
     var viewEl = document.getElementById('map-view-text');
 
     // The "Viewing" line: one precomputed string per selection key (no date
@@ -530,12 +557,23 @@ export const MAP_SCRIPT = `
         // are any — a marker the owner tapped from the findings list must answer
         // "was anybody in the cab?" without sending him back to the table.
         var badge = st.engine === 'parked' ? txt.stopParked : st.engine === 'running' ? txt.stopRunning : '';
-        var times = st.engineOffAt ? esc(st.engineOffAt) + (st.engineOnAt ? ' \u2192 ' + esc(st.engineOnAt) : ' \u2192') : '';
-        marker.bindPopup(
-          '<b>' + esc(known ? st.site : txt.unknown) + '</b><br>' +
-          esc(st.arrive) + '–' + esc(st.depart) + ' (' + esc(st.minutes) + ' ' + esc(txt.minutes) + ')' +
-          (badge ? '<br>' + esc(badge) + (times ? ' ' + times : '') : '')
-        );
+        var text = stopText[j];
+        if (text) {
+          // The server's own words (the table's and the Viewing line's): a marker
+          // must not say 00:02–13:08 beside a row that says 29 ก.ย. 14:34.
+          marker.bindPopup(
+            '<b>' + esc(text.place) + '</b><br>' +
+            esc(text.range) + ' (' + esc(st.minutes) + (text.past ? '*' : '') + ' ' + esc(txt.minutes) + ')' +
+            (badge ? '<br>' + esc(badge) + (text.engine ? ' ' + esc(text.engine) : '') : '')
+          );
+        } else {
+          var times = st.engineOffAt ? esc(st.engineOffAt) + (st.engineOnAt ? ' \u2192 ' + esc(st.engineOnAt) : ' \u2192') : '';
+          marker.bindPopup(
+            '<b>' + esc(known ? st.site : txt.unknown) + '</b><br>' +
+            esc(st.arrive) + '–' + esc(st.depart) + ' (' + esc(st.minutes) + ' ' + esc(txt.minutes) + ')' +
+            (badge ? '<br>' + esc(badge) + (times ? ' ' + times : '') : '')
+          );
+        }
         stopMarkers.push(marker);
         stopCoords.push([st.lat, st.lon]);
       }
