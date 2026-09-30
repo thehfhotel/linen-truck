@@ -156,6 +156,7 @@ describe("/feed/* auth (§7)", () => {
     // §9: the range shape drops trips/stops/legs/path and keeps findings.
     expect(body.days[1]).not.toHaveProperty("trips");
     expect(body.days[1]).not.toHaveProperty("path");
+    expect(body.days[1]).not.toHaveProperty("gaps");
     expect(body.days[1]).toHaveProperty("findings");
 
     const tooLong = await app(seeded()).handle(
@@ -223,6 +224,8 @@ describe("/api/day/:ymd", () => {
     expect(body.legs).toHaveLength(3);
     expect(body.path).toHaveLength(82);
     expect(body.path[0]).toHaveLength(3);
+    // §3 rule 10: no silence over 300 s inside any trip of this day.
+    expect(body.gaps).toEqual([]);
 
     // Every stop of this day is at a known site (§3), so the only finding left is
     // the long way round from HF to HF Ville.

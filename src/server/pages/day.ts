@@ -322,6 +322,11 @@ export function renderDayPage(args: DayPageArgs): string {
   const tripRows = report.trips ?? [];
   const stopRows = report.stops ?? [];
   const views = mapViews(report, sites);
+  // §8: one line under the map, only when the day has a GPS gap to explain.
+  const gapLegend =
+    (report.gaps ?? []).length > 0
+      ? `\n<p class="gaplegend"><i aria-hidden="true"></i>${escapeHtml(pair(LABELS.gapLegend))}</p>`
+      : "";
   const dated = (heading: L): string =>
     `<h2>${pairHtml(heading)} <span class="hdate">${escapeHtml(thaiLongDate(report.date))}</span></h2>`;
 
@@ -371,7 +376,7 @@ ${
 ${dated(LABELS.mapHeading)}
 ${chipsHtml(report, sites)}
 <p class="viewing" id="map-view">${pairHtml(LABELS.viewing)}: <span id="map-view-text">${escapeHtml(views.all!)}</span></p>${mapNote}
-<div id="map" data-ymd="${escapeHtml(report.date)}"></div>
+<div id="map" data-ymd="${escapeHtml(report.date)}"></div>${gapLegend}
 </section>`;
 
   const head = `
@@ -387,6 +392,7 @@ ${chipsHtml(report, sites)}
       minutes: LABELS.colMinutes.th,
       stopParked: LABELS.stopParked.th,
       stopRunning: LABELS.stopRunning.th,
+      gapStraight: pair(LABELS.gapStraightLine),
     },
     views,
     stopText: stopTexts(report, sites),
@@ -622,6 +628,12 @@ export function mapScript(basemap: Basemap): string {
     var TRIP_DIM = { opacity: 0.25, weight: 3 };
     var TRIP_ON = { opacity: 1, weight: 6 };
     var REST_STYLE = { color: '#8b0000', weight: 2, opacity: 0.3, dashArray: '2 6' };
+    // A GPS gap (§3 rule 10): long dashes in the trip colour, clearly not the thin
+    // dotted REST_STYLE. Every restyle merges over GAP_BASE, never TRIP_BASE, so the
+    // dash is never lost.
+    var GAP_BASE = { color: '#8b0000', weight: 3, opacity: 0.85, dashArray: '10 8' };
+    var GAP_DIM = { opacity: 0.25, weight: 2 };
+    var GAP_ON = { opacity: 1, weight: 5 };
 
     fetch('/api/day/' + encodeURIComponent(el.getAttribute('data-ymd')), {
       headers: { accept: 'application/json' },
@@ -633,6 +645,7 @@ export function mapScript(basemap: Basemap): string {
       var path = d.path || [];
       var trips = d.trips || [];
       var stops = d.stops || [];
+      var gaps = Array.isArray(d.gaps) ? d.gaps : [];
 
       function tripAt(t) {
         for (var i = 0; i < trips.length; i++) {
@@ -641,14 +654,36 @@ export function mapScript(basemap: Basemap): string {
         return null;
       }
 
+      // A GPS gap (§3 rule 10) is a pair of CONSECUTIVE fixes of one trip, matched
+      // on the two epoch seconds the server reports. Null when the pair is not one.
+      function gapBetween(a, b) {
+        for (var k = 0; k < gaps.length; k++) {
+          if (gaps[k] && gaps[k].fromAt === a[2] && gaps[k].toAt === b[2]) return gaps[k];
+        }
+        return null;
+      }
+
       // One segment per contiguous run of points belonging to the same trip (or
-      // to no trip at all — parked/rest time), in path order.
+      // to no trip at all — parked/rest time), in path order. A trip's run is
+      // also cut at every gap: the solid line ends at the gap's first fix, the
+      // gap becomes its own 2-point segment, and a new solid run starts at the
+      // gap's second fix.
       var segments = [];
+      var gapSegments = [];
       var current = null;
       for (var i = 0; i < path.length; i++) {
         var p = path[i];
         var n = tripAt(p[2]);
-        if (!current || current.n !== n) {
+        var gap = (current && n !== null && current.n === n && i > 0) ? gapBetween(path[i - 1], p) : null;
+        if (gap) {
+          gapSegments.push({
+            n: n,
+            gap: gap,
+            coords: [[path[i - 1][0], path[i - 1][1]], [p[0], p[1]]]
+          });
+          current = { n: n, coords: [] };
+          segments.push(current);
+        } else if (!current || current.n !== n) {
           current = { n: n, coords: [] };
           segments.push(current);
         }
@@ -656,6 +691,7 @@ export function mapScript(basemap: Basemap): string {
       }
 
       var tripLayers = {};
+      var gapLayers = {};
       var tripCoords = {};
       var dayCoords = [];
       for (var i = 0; i < path.length; i++) dayCoords.push([path[i][0], path[i][1]]);
@@ -671,6 +707,25 @@ export function mapScript(basemap: Basemap): string {
           tripLayers[seg.n].push(line);
           tripCoords[seg.n] = tripCoords[seg.n].concat(seg.coords);
         }
+      }
+
+      // The gap lines belong to their trip's highlight group (tripCoords, so a
+      // trip selection frames them too) but live in their own layer list, because
+      // every restyle builds their style from GAP_BASE — the dash survives it.
+      // A gap that cannot be drawn must never stop the stops from drawing.
+      for (var i = 0; i < gapSegments.length; i++) {
+        try {
+          var gs = gapSegments[i];
+          var gline = L.polyline(gs.coords, GAP_BASE).addTo(map);
+          var gt = gs.gap.text || {};
+          gline.bindPopup(
+            '<b>' + esc(gt.th) + '</b><br>' + esc(gt.en) + '<br>' + esc(txt.gapStraight)
+          );
+          if (!gapLayers[gs.n]) gapLayers[gs.n] = [];
+          gapLayers[gs.n].push(gline);
+          if (!tripCoords[gs.n]) tripCoords[gs.n] = [];
+          tripCoords[gs.n] = tripCoords[gs.n].concat(gs.coords);
+        } catch (e) { /* ignore */ }
       }
 
       var stopMarkers = [];
@@ -729,6 +784,10 @@ export function mapScript(basemap: Basemap): string {
           if (!Object.prototype.hasOwnProperty.call(tripLayers, n)) continue;
           for (var k = 0; k < tripLayers[n].length; k++) tripLayers[n][k].setStyle(TRIP_BASE);
         }
+        for (var g in gapLayers) {
+          if (!Object.prototype.hasOwnProperty.call(gapLayers, g)) continue;
+          for (var k = 0; k < gapLayers[g].length; k++) gapLayers[g][k].setStyle(GAP_BASE);
+        }
         setChipActive('all');
         if (dayBounds.isValid()) map.fitBounds(dayBounds.pad(0.15));
       }
@@ -741,6 +800,15 @@ export function mapScript(basemap: Basemap): string {
           var style = mergeStyle(TRIP_BASE, on ? TRIP_ON : TRIP_DIM);
           for (var k = 0; k < tripLayers[n].length; k++) tripLayers[n][k].setStyle(style);
           if (on) bounds.extend(coordBounds(tripCoords[n] || []));
+        }
+        for (var g in gapLayers) {
+          if (!Object.prototype.hasOwnProperty.call(gapLayers, g)) continue;
+          var gapOn = ns.indexOf(Number(g)) >= 0;
+          var gapStyle = mergeStyle(GAP_BASE, gapOn ? GAP_ON : GAP_DIM);
+          for (var k = 0; k < gapLayers[g].length; k++) gapLayers[g][k].setStyle(gapStyle);
+          // A trip whose whole path is one gap has no solid line, so tripLayers never
+          // saw it: frame it from here (extending a normal trip twice is harmless).
+          if (gapOn) bounds.extend(coordBounds(tripCoords[g] || []));
         }
         setChipActive('trip-' + ns.join('-'));
         if (bounds.isValid()) map.fitBounds(bounds.pad(0.25));
@@ -831,5 +899,5 @@ export function mapScript(basemap: Basemap): string {
 `;
 }
 
-/** The OSM variant: today's script, byte for byte. */
+/** The OSM variant (`mapScript("osm")`). */
 export const MAP_SCRIPT = mapScript("osm");

@@ -103,7 +103,7 @@ you@example.com` — same rule as guest-feedback.
 
 ## Architecture
 
-- `src/domain/` — types, geo, segment, audit, summary, sinotrackRow. Pure,
+- `src/domain/` — types, geo, segment, audit, gaps, summary, sinotrackRow. Pure,
   unit-tested, no IO.
 - `src/server/sinotrack.ts` — the platform client (login, track, mileage,
   OBD), signed requests, 20 s timeout.

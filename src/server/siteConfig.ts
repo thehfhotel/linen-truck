@@ -36,6 +36,7 @@ export const DEFAULT_RULES: Rules = Object.freeze({
   engineOnVolts: 13.2,
   engineHoldS: 300,
   jitterRadiusM: 600,
+  gapS: 300,
 });
 
 /** Where the shipped files live inside the image (`WORKDIR/config`). */
@@ -105,9 +106,11 @@ export function loadRules(dir: string = configDir()): Rules {
   base.detourRatio = num(r.detourRatio, base.detourRatio);
   base.engineOnVolts = num(r.engineOnVolts, base.engineOnVolts);
   // Added after the first deploy: a rules.json written before them still boots,
-  // and keeps the §2 values rather than an engine guard that is silently off.
+  // and keeps the §2 values rather than an engine guard that is silently off
+  // (`gapS`, rev 4 GPS gaps, joins them the same way).
   base.engineHoldS = num(r.engineHoldS, base.engineHoldS);
   base.jitterRadiusM = num(r.jitterRadiusM, base.jitterRadiusM);
+  base.gapS = num(r.gapS, base.gapS);
 
   if (typeof r.schedule === "object" && r.schedule !== null) {
     const s = r.schedule as Record<string, unknown>;

@@ -118,6 +118,13 @@ export const LABELS = {
     th: "แผนที่พื้นหลังหยุดชั่วคราว (เกินโควตาวันนี้หรือโหลดไม่ได้) — เส้นทางยังแสดงครบ",
     en: "Basemap paused (today's quota reached or unavailable) — the route is still shown",
   },
+  /**
+   * GPS gaps inside trips (§3 rule 10, §8). The legend line under the map and the
+   * line that closes a gap's popup: the dashed stretch is two fixes joined by a
+   * straight line, never the route the truck drove.
+   */
+  gapLegend: { th: "ไม่มีสัญญาณ GPS (ลากเส้นตรง)", en: "No GPS data (straight line)" },
+  gapStraightLine: { th: "เส้นตรง ไม่ใช่เส้นทางจริง", en: "straight line, not the route driven" },
   /** Footer credit + links, Google basemap only (Google Maps Platform Terms 3.2.2(a)(i)). */
   mapCredit: { th: "แผนที่", en: "Map: Google Maps" },
   mapTerms: { th: "ข้อกำหนด", en: "Terms" },
@@ -179,6 +186,16 @@ export const detourText = (from: L, to: L, km: number, referenceKm: number, rati
 export const outsideHoursText = (start: string, end: string, km: number): L => ({
   th: `วิ่งนอกเวลางาน ${start}–${end} ระยะ ${km} กม.`,
   en: `Driving outside working hours ${start}–${end}, ${km} km`,
+});
+
+/**
+ * `ไม่มีสัญญาณ GPS 10 นาที (14:32–14:43)` · `No GPS data for 10 min (14:32–14:43)` —
+ * the sentence a GPS gap (§3 rule 10) carries. The Thai duration arrives already
+ * formatted (`10 นาที`, or hours and minutes for a long one), the English is plain minutes.
+ */
+export const gapText = (durationTh: string, minutes: number, start: string, end: string): L => ({
+  th: `ไม่มีสัญญาณ GPS ${durationTh} (${start}–${end})`,
+  en: `No GPS data for ${minutes} min (${start}–${end})`,
 });
 
 /** `4 นาที` · `4 min` — the duration suffix every table cell shares. */
