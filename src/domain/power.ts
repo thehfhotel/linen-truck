@@ -5,7 +5,8 @@
 // from docs/research/tracker-unplug-voltage.md, built now and tuned after the first
 // real event. Every signal is silent on today's data (5,878 production fixes: the
 // alarm word is 0 on every row, the battery byte is 100 wherever it is present and
-// 0 on the store-and-forward rows, the supply never below 11 V), so a finding here
+// 0 on the store-and-forward rows, the supply never below 11 V, every fix without a
+// voltage a store-and-forward row), so a finding here
 // is news.
 //
 // REPORT ONLY. Nothing here feeds a number of rules 1-10, and there is no push of
@@ -18,7 +19,7 @@
 import type { Finding, Point, PowerReason, Rules } from "./types.ts";
 
 /** The reasons in the fixed order a finding lists them. */
-export const POWER_REASONS: readonly PowerReason[] = ["battery", "power-cut", "on-battery", "shutdown", "low-supply"];
+export const POWER_REASONS: readonly PowerReason[] = ["battery", "power-cut", "on-battery", "shutdown", "low-supply", "no-supply"];
 
 /** `nTEState` bit 3 — the vendor's "send stored data": a store-and-forward row, late by hours. */
 const TE_STORED = 0x8;
@@ -52,6 +53,10 @@ export function fixReasons(p: Point, rules: Rules): PowerReason[] {
   if (te !== null && (unsigned(te) & TE_ON_BATTERY) !== 0) out.push("on-battery");
   if (te !== null && (unsigned(te) & TE_SHUTDOWN) !== 0) out.push("shutdown");
   if (p.voltage !== null && p.voltage < rules.unpluggedVolts) out.push("low-supply");
+  // No `Voltages=` on a LIVE fix (a null teState counts as live): with no external power
+  // the tracker cannot measure the truck battery. A stored row is excluded — its missing
+  // voltage is the store-and-forward format, on a plugged-in tracker.
+  if (p.voltage === null && !isStored(te)) out.push("no-supply");
   return out;
 }
 

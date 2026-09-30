@@ -85,16 +85,16 @@ describe("audit — detours", () => {
 
 describe("audit — outside hours", () => {
   const moving = (hhmmss: string, speed = 40): Point =>
-    pt(bkk("2026-09-05", hhmmss), lerp(HF, HFVILLE, 0.3), { speed });
+    pt(bkk("2026-09-05", hhmmss), lerp(HF, HFVILLE, 0.3), { speed, voltage: 13.8 });
 
   it("should group moving fixes into runs and split on a gap over 600 s", () => {
     const points = [
-      pt(bkk("2026-09-05", "09:00:00"), HF, { speed: 40 }),
-      pt(bkk("2026-09-05", "09:01:00"), lerp(HF, HFVILLE, 0.25), { speed: 60 }),
-      pt(bkk("2026-09-05", "09:02:00"), lerp(HF, HFVILLE, 0.5), { speed: 60 }),
+      pt(bkk("2026-09-05", "09:00:00"), HF, { speed: 40, voltage: 13.8 }),
+      pt(bkk("2026-09-05", "09:01:00"), lerp(HF, HFVILLE, 0.25), { speed: 60, voltage: 13.8 }),
+      pt(bkk("2026-09-05", "09:02:00"), lerp(HF, HFVILLE, 0.5), { speed: 60, voltage: 13.8 }),
       // 11 minutes later — a new errand, not the same run.
-      pt(bkk("2026-09-05", "09:13:00"), lerp(HF, HFVILLE, 0.75), { speed: 60 }),
-      pt(bkk("2026-09-05", "09:14:00"), HFVILLE, { speed: 30 }),
+      pt(bkk("2026-09-05", "09:13:00"), lerp(HF, HFVILLE, 0.75), { speed: 60, voltage: 13.8 }),
+      pt(bkk("2026-09-05", "09:14:00"), HFVILLE, { speed: 30, voltage: 13.8 }),
     ];
     const found = audit("2026-09-05", EMPTY_SEG, points, SITES, RULES);
     expect(kinds(found)).toEqual(["outside-hours", "outside-hours"]);
@@ -125,7 +125,7 @@ describe("audit — outside hours", () => {
 
   it("should read the wall clock in Bangkok, not UTC", () => {
     // 09:00 UTC is 16:00 Bangkok — outside hours; 05:00 UTC is 12:00 Bangkok — inside.
-    const at = (iso: string): Point => pt(Date.parse(iso) / 1000, HF, { speed: 40 });
+    const at = (iso: string): Point => pt(Date.parse(iso) / 1000, HF, { speed: 40, voltage: 13.8 });
     expect(kinds(audit("2026-09-05", EMPTY_SEG, [at("2026-09-05T05:00:00Z")], SITES, RULES))).toEqual([]);
     expect(kinds(audit("2026-09-05", EMPTY_SEG, [at("2026-09-05T09:00:00Z")], SITES, RULES))).toEqual([
       "outside-hours",

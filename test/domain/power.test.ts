@@ -24,8 +24,12 @@ const SLEEP = 0x80000000;
 const YMD = "2026-09-05";
 const T0 = bkk(YMD, "14:00:00");
 
-/** A fix `i` minutes after 14:00 at HF, with only the power-relevant fields stated. */
-const at = (i: number, over: Partial<Point> = {}): Point => ({ ...pt(T0 + i * 60, HF), ...over });
+/**
+ * A fix `i` minutes after 14:00 at HF, with only the power-relevant fields stated. It carries a
+ * healthy supply reading (12.7 V) unless a case says otherwise: a null voltage on a live fix is
+ * itself a reason (`no-supply`), and these cases are about the OTHER reasons.
+ */
+const at = (i: number, over: Partial<Point> = {}): Point => ({ ...pt(T0 + i * 60, HF, { voltage: 12.7 }), ...over });
 
 const reasons = (p: Partial<Point>): PowerReason[] => fixReasons(at(0, p), RULES);
 
@@ -59,9 +63,9 @@ describe("per fix — the battery byte", () => {
     expect(reasons({ teState: te(80, STORED) })).toEqual([]);
   });
 
-  it("should say nothing when teState is null or absent", () => {
+  it("should say nothing when teState is null or absent (and the supply reads fine)", () => {
     expect(reasons({ teState: null })).toEqual([]);
-    expect(fixReasons({ t: T0, lat: HF.lat, lon: HF.lon, speed: 0, voltage: null }, RULES)).toEqual([]);
+    expect(fixReasons({ t: T0, lat: HF.lat, lon: HF.lon, speed: 0, voltage: 12.7 }, RULES)).toEqual([]);
   });
 });
 
@@ -113,13 +117,41 @@ describe("per fix — the supply voltage", () => {
     expect(reasons({ voltage: 12.7 })).toEqual([]);
   });
 
-  it("should never read a null voltage as low", () => {
-    expect(reasons({ voltage: null })).toEqual([]);
+  it("should never read a null voltage as low (a live one is `no-supply`, below)", () => {
+    expect(reasons({ voltage: null, teState: STORED })).toEqual([]);
+    expect(reasons({ voltage: null })).not.toContain("low-supply");
   });
 
   it("should read the threshold from the rules it is given", () => {
     expect(fixReasons(at(0, { voltage: 11.5 }), { ...RULES, unpluggedVolts: 12 })).toEqual(["low-supply"]);
     expect(fixReasons(at(0, { voltage: 11.5 }), RULES)).toEqual([]);
+  });
+});
+
+describe("per fix — no supply reading", () => {
+  it("should flag a LIVE fix with a null voltage", () => {
+    expect(reasons({ teState: 0x644000, voltage: null })).toEqual(["no-supply"]);
+    expect(reasons({ teState: te(100), voltage: null })).toEqual(["no-supply"]);
+  });
+
+  it("should count a null teState as live", () => {
+    expect(reasons({ teState: null, voltage: null })).toEqual(["no-supply"]);
+    expect(fixReasons({ t: T0, lat: HF.lat, lon: HF.lon, speed: 0, voltage: null }, RULES)).toEqual(["no-supply"]);
+  });
+
+  it("should NOT flag a store-and-forward row (bit 3): its missing voltage is the stored format", () => {
+    expect(reasons({ teState: 0x8, voltage: null })).toEqual([]); // the 53 real rows
+    expect(reasons({ teState: 0x644008, voltage: null })).toEqual([]);
+  });
+
+  it("should not flag any fix that carries a voltage, 0 V included (that one is low-supply)", () => {
+    expect(reasons({ teState: 0x644000, voltage: 12.7 })).toEqual([]);
+    expect(reasons({ teState: null, voltage: 12.7 })).toEqual([]);
+    expect(reasons({ teState: 0x644000, voltage: 0 })).toEqual(["low-supply"]);
+  });
+
+  it("should still flag a stored row that carries another reason, but not for the missing voltage", () => {
+    expect(reasons({ teState: te(100, ON_BATTERY | STORED), voltage: null })).toEqual(["on-battery"]);
   });
 });
 
@@ -131,6 +163,14 @@ describe("per fix — order", () => {
       "on-battery",
       "shutdown",
       "low-supply",
+    ]);
+    // low-supply and no-supply need a voltage that is both present and absent: they never share a fix.
+    expect(reasons({ teState: te(80, ON_BATTERY | SHUTDOWN), alarm: 8, voltage: null })).toEqual([
+      "battery",
+      "power-cut",
+      "on-battery",
+      "shutdown",
+      "no-supply",
     ]);
   });
 });
@@ -189,6 +229,37 @@ describe("runs — trackerPower", () => {
 
   it("should treat a stored row with no reason as neutral even with a null voltage (the 53 real 0x8 rows)", () => {
     expect(trackerPower([low(0, 80), at(1, { teState: 0x8, voltage: null }), low(2, 70)], RULES)).toHaveLength(1);
+  });
+
+  it("should flag a live null-voltage fix as no-supply and open a run on it", () => {
+    const live = (i: number): Point => at(i, { teState: 0x644000, voltage: null });
+    const out = trackerPower([clear(0), live(1), live(2), clear(3)], RULES);
+    expect(out).toEqual([
+      {
+        kind: "tracker-power",
+        start: T0 + 60,
+        end: T0 + 120,
+        reasons: ["no-supply"],
+        minBatteryPct: null,
+        minVoltage: null,
+        fixes: 2,
+        lat: HF.lat,
+        lon: HF.lon,
+      },
+    ]);
+    expect(trackerPower([at(0, { teState: null, voltage: null })], RULES)).toHaveLength(1); // null teState = live
+  });
+
+  it("should leave a stored null-voltage row NEUTRAL: it bridges a run but neither starts, extends nor ends one", () => {
+    const live = (i: number): Point => at(i, { teState: 0x644000, voltage: null });
+    for (const word of [0x8, 0x644008]) {
+      const s = (i: number): Point => at(i, { teState: word, voltage: null });
+      expect(trackerPower([s(0), s(1), clear(2)], RULES)).toEqual([]); // never starts
+      const out = trackerPower([live(0), s(1), live(2), s(3), clear(4)], RULES); // bridges
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({ start: T0, end: T0 + 120, fixes: 2, reasons: ["no-supply"] });
+      expect(trackerPower([live(0), s(1)], RULES)[0]!.end).toBe(T0); // does not extend
+    }
   });
 
   it("should flag a stored row that carries a real reason, and count it", () => {
@@ -315,6 +386,13 @@ describe("the archived 2026-09-05 fixture", () => {
     expect(RAW.every((r) => r.nAlarmState === "0")).toBe(true);
     expect([...new Set(RAW.map((r) => Number(r.nTEState)))].sort((x, y) => x - y)).toEqual([0x8, 0x644000, 0x644008]);
     expect(POINTS.every((p) => p.alarm === 0)).toBe(true);
+  });
+
+  it("has exactly ONE row with no voltage, and it is a store-and-forward row (nTEState 0x8): neutral, never no-supply", () => {
+    const bare = RAW.filter((r) => !/Voltages=/.test(r.strOther ?? ""));
+    expect(bare.map((r) => Number(r.nTEState))).toEqual([0x8]);
+    expect(POINTS.filter((p) => p.voltage === null).map((p) => p.teState)).toEqual([0x8]);
+    expect(POINTS.filter((p) => fixReasons(p, RULES).includes("no-supply"))).toEqual([]);
   });
 
   it("should raise 0 tracker-power and 0 tracker-alarm, and leave the day exactly as it was", () => {
