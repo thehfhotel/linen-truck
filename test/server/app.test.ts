@@ -301,8 +301,14 @@ describe("the pages", () => {
     expect(nonce).toBeTruthy();
     expect(csp).not.toContain("unsafe-inline");
     expect(csp).toContain("https://cdnjs.cloudflare.com");
+    expect(csp).toContain("img-src 'self' data: https://tile.openstreetmap.org");
 
     const html = await res.text();
+    // OSM answers a tile request without a Referer with a 403 "Access blocked"
+    // image, and the page policy (same-origin) sends none cross-origin — so the
+    // tile layer must opt in to the bare origin, on the host the CSP allows.
+    expect(html).toContain("'https://tile.openstreetmap.org/{z}/{x}/{y}.png'");
+    expect(html).toContain("referrerPolicy: 'strict-origin-when-cross-origin'");
     expect(html).toContain(`nonce="${nonce}"`);
     expect(html).toContain('integrity="sha512-BwHfrr4c9kmRkLw6iXFdzcdWV/PGkVgiIyIWLLlTSXzWQzxuSg4DiQUCpauz/EWjgk5TYQqX/kvn9pG1NpYfqg=="');
     expect(html).toContain(`data-ymd="${YMD}"`);

@@ -315,9 +315,15 @@ const MAP_SCRIPT = `
     var txt = cfg.txt || {};
 
     var map = L.map(el, { scrollWheelZoom: false });
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    // OSM's tile usage policy requires a Referer: a tile requested without one
+    // comes back as a 403 "Access blocked" image. The page's own policy is
+    // same-origin (no Referer leaves the site), so the tiles alone opt into
+    // sending the bare origin — never the /day/<date> path. The a/b/c
+    // subdomains are deprecated by OSM; the bare host is the supported one.
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
-      attribution: '&copy; OpenStreetMap'
+      referrerPolicy: 'strict-origin-when-cross-origin',
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }).addTo(map);
 
     ${MAP_ESC_FN}

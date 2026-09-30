@@ -64,7 +64,7 @@ export function pageHeaders(nonce: string, extra?: Record<string, string>): Head
       `script-src 'nonce-${nonce}' https://cdnjs.cloudflare.com`,
       `style-src 'nonce-${nonce}' https://cdnjs.cloudflare.com https://fonts.googleapis.com`,
       "font-src https://fonts.gstatic.com",
-      "img-src 'self' data: https://*.tile.openstreetmap.org",
+      "img-src 'self' data: https://tile.openstreetmap.org",
       "connect-src 'self'",
       "base-uri 'none'",
       "form-action 'none'",
