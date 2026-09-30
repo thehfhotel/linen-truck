@@ -22,6 +22,7 @@
 import type { DaySummary, Finding, Leg, Point, Rules, Site, Stop, Trip } from "../domain/types.ts";
 import { mapUrl } from "../domain/geo.ts";
 import { cleanPoints } from "../domain/segment.ts";
+import type { StopSpan } from "../domain/span.ts";
 import {
   detourText,
   outsideHoursText,
@@ -138,6 +139,21 @@ export interface ReportStop {
   engineOnAt: string | null;
   /** Minutes with the engine off, floored like every other duration in §9. */
   engineOffMin: number;
+  /**
+   * The stop's REAL extent, additive to §9 (stop spans, 2026-09-30): the day
+   * report only sees one Bangkok day, so a stop that crosses midnight is clipped
+   * in `arrive`/`depart`/`minutes` above — which stay exactly as the day counts
+   * them — while these look into the neighbouring days. Always present; the stop's
+   * own values (and `spanArriveOpen: false`) when the report was built without spans.
+   */
+  spanArriveAt: number;
+  /** True when the data window began inside this stop: the real arrival is at or before `spanArriveAt`. */
+  spanArriveOpen: boolean;
+  /** Null = no departure in the data (still parked, or the data ends inside the stop). */
+  spanDepartAt: number | null;
+  /** Epoch seconds, unlike `engineOffAt`/`engineOnAt` above, so a consumer can date them. */
+  spanEngineOffAt: number | null;
+  spanEngineOnAt: number | null;
   /** Present only for the two synthetic day-edge stops (§3 rule 3). */
   virtual?: "track-start" | "track-end";
 }
@@ -241,7 +257,7 @@ function toTrip(trip: Trip): ReportTrip {
   };
 }
 
-function toStop(stop: Stop): ReportStop {
+function toStop(stop: Stop, span?: StopSpan): ReportStop {
   const out: ReportStop = {
     arrive: hhmm(stop.arrive),
     depart: hhmm(stop.depart),
@@ -257,6 +273,11 @@ function toStop(stop: Stop): ReportStop {
     engineOffAt: stop.engine.offAt === null ? null : hhmm(stop.engine.offAt),
     engineOnAt: stop.engine.onAt === null ? null : hhmm(stop.engine.onAt),
     engineOffMin: minutesOf(stop.engine.offS),
+    spanArriveAt: span ? span.arriveAt : stop.arrive,
+    spanArriveOpen: span ? span.arriveOpen : false,
+    spanDepartAt: span ? span.departAt : stop.depart,
+    spanEngineOffAt: span ? span.engineOffAt : stop.engine.offAt,
+    spanEngineOnAt: span ? span.engineOnAt : stop.engine.onAt,
   };
   if (stop.virtual !== undefined) out.virtual = stop.virtual;
   return out;
@@ -396,6 +417,8 @@ export interface BuildArgs {
   pollerConfigured: boolean;
   /** Epoch seconds; the caller's clock, never `Date.now()` here. */
   generatedAt: number;
+  /** One per `summary.stops`, same order (`stopSpans`); absent means every stop is its own span. */
+  spans?: StopSpan[];
 }
 
 export function buildDayReport(args: BuildArgs): DayReport {
@@ -440,7 +463,7 @@ export function buildDayReport(args: BuildArgs): DayReport {
       findingCount,
     },
     trips: summary.trips.map(toTrip),
-    stops: summary.stops.map(toStop),
+    stops: summary.stops.map((stop, i) => toStop(stop, args.spans?.[i])),
     legs: summary.legs.map((leg) => toLeg(leg, rules)),
     findings: summary.findings.map((f) => toFinding(f, sites, summary.stops)),
     path: points.map((p): PathPoint => [coord5(p.lat), coord5(p.lon), p.t]),

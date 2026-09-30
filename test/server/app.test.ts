@@ -7,13 +7,15 @@
 
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { createApp, isYmd, weekDays } from "../../src/server/app.ts";
+import { createApp, dayReport, isYmd, resolveDeps, weekDays } from "../../src/server/app.ts";
 import { _internal as authInternal } from "../../src/server/auth.ts";
 import { loadConfig, type Config, type Env } from "../../src/server/config.ts";
-import { openDatabase } from "../../src/server/db.ts";
+import { insertPoints, openDatabase, type PointRow } from "../../src/server/db.ts";
 import { MAP_ESC_FN } from "../../src/server/pages/day.ts";
 import { loadRules, loadSites } from "../../src/server/siteConfig.ts";
 import { importRawRows } from "../../scripts/import.ts";
+import { HF, HFVILLE, bkk, lerp, parked, pt } from "../domain/support.ts";
+import type { Point } from "../../src/domain/types.ts";
 import raw from "../fixtures/2026-09-05.raw.json";
 
 const TEID = "1000000001";
@@ -404,5 +406,158 @@ describe("isYmd", () => {
     expect(isYmd("2026-00-10")).toBe(false);
     expect(isYmd("2026-9-5")).toBe(false);
     expect(isYmd("")).toBe(false);
+  });
+});
+
+// ── stop spans (docs/CONTRACTS.md §9, "Additive since 2026-09-30") ───────────
+//
+// The production shape of the bug: the truck parked at HF Ville on the 29th at
+// 14:34 and stayed the night, went to HF and back, and is STILL at HF Ville at
+// the moment the report is read. Synthetic points only.
+
+describe("stop spans on the day routes", () => {
+  const NOW_30 = new Date(bkk("2026-09-30", "19:00:00") * 1000);
+  const ARRIVE_29 = bkk("2026-09-29", "14:34:00");
+  const YMD_30 = "2026-09-30";
+
+  const driveIn = (tArrive: number): Point[] =>
+    [0.2, 0.4, 0.6, 0.8].map((f, i) => pt(tArrive - 60 * (4 - i), lerp(HF, HFVILLE, f), { speed: 47, voltage: 13.8 }));
+  const leg = (t0: number, a: typeof HF, b: typeof HF): Point[] =>
+    [0.2, 0.4, 0.6, 0.8].map((f, i) => pt(t0 + 60 * i, lerp(a, b, f), { speed: 47, voltage: 13.8 }));
+
+  const overnight = parked(ARRIVE_29, HFVILLE, 136, 600, { voltage: 12.7 }); // to 2026-09-30 13:04
+  const leftVille = overnight[overnight.length - 1]!.t;
+  const atHf = bkk(YMD_30, "13:21:00");
+  const backAt = bkk(YMD_30, "14:26:00");
+  const points: Point[] = [
+    ...driveIn(ARRIVE_29),
+    ...overnight,
+    ...leg(leftVille + 60, HFVILLE, HF),
+    ...parked(atHf, HF, 26, 60, { voltage: 12.7 }), // 13:21–13:46
+    ...leg(bkk(YMD_30, "13:47:00"), HF, HFVILLE),
+    ...parked(backAt, HFVILLE, 275, 60, { voltage: 12.7 }), // 14:26–19:00, the last fix is "now"
+  ];
+
+  const toRow = (p: Point): PointRow => ({
+    teid: TEID,
+    t: p.t,
+    lat: p.lat,
+    lon: p.lon,
+    speed: p.speed,
+    direction: null,
+    mileageM: null,
+    carState: null,
+    teState: null,
+    alarmState: null,
+    voltage: p.voltage,
+    other: null,
+  });
+
+  function seededSpans(): Database {
+    const db = openDatabase(":memory:");
+    insertPoints(db, points.map(toRow), 1);
+    return db;
+  }
+  const appNow = (db: Database) =>
+    createApp(db, { config: config(), now: () => NOW_30, sites: loadSites(), rules: loadRules() });
+
+  test("the last synthetic fix is exactly `now` (the window's upper bound is inclusive of it)", () => {
+    expect(points[points.length - 1]!.t).toBe(NOW_30.getTime() / 1000);
+  });
+
+  test("/api/day: the clipped first row keeps its numbers and gains the true arrival", async () => {
+    const res = await appNow(seededSpans()).handle(staffReq(`/api/day/${YMD_30}`));
+    const body = (await res.json()) as Record<string, any>;
+    const first = body.stops[0];
+    expect(first.site).toBe("hfville");
+    // The day's own view: clipped at midnight, minutes counted inside the day.
+    expect(first.arriveAt).toBeGreaterThanOrEqual(bkk(YMD_30, "00:00:00"));
+    expect(first.arrive).toMatch(/^00:0\d$/);
+    expect(first.minutes).toBe(Math.floor((first.departAt - first.arriveAt) / 60));
+    // The truth, additively.
+    expect(first.spanArriveAt).toBe(ARRIVE_29);
+    expect(first.spanArriveOpen).toBe(false);
+    expect(first.spanDepartAt).toBe(first.departAt);
+    expect(first.spanEngineOffAt).toBe(ARRIVE_29);
+  });
+
+  test("/api/day: the last row is still parked — spanDepartAt null, minutes as the day counted them", async () => {
+    const res = await appNow(seededSpans()).handle(staffReq(`/api/day/${YMD_30}`));
+    const body = (await res.json()) as Record<string, any>;
+    const last = body.stops[body.stops.length - 1];
+    expect(last.arrive).toBe("14:26");
+    expect(last.depart).toBe("19:00");
+    expect(last.spanArriveAt).toBe(last.arriveAt);
+    expect(last.spanDepartAt).toBeNull();
+    expect(last.minutes).toBe(274);
+  });
+
+  test("every stop carries all five span fields, and the old fields are still there", async () => {
+    const res = await appNow(seededSpans()).handle(staffReq(`/api/day/${YMD_30}`));
+    const body = (await res.json()) as Record<string, any>;
+    for (const stop of body.stops) {
+      for (const key of ["spanArriveAt", "spanArriveOpen", "spanDepartAt", "spanEngineOffAt", "spanEngineOnAt"]) {
+        expect(stop).toHaveProperty(key);
+      }
+      for (const key of ["arrive", "depart", "arriveAt", "departAt", "minutes", "engine", "engineOffAt", "engineOnAt", "engineOffMin", "engineOnMin"]) {
+        expect(stop).toHaveProperty(key);
+      }
+    }
+  });
+
+  test("the summary does not move: time at site is still the day's own", async () => {
+    const res = await appNow(seededSpans()).handle(staffReq(`/api/day/${YMD_30}`));
+    const body = (await res.json()) as Record<string, any>;
+    const ville = body.stops.filter((s: any) => s.site === "hfville").reduce((n: number, s: any) => n + s.minutes, 0);
+    expect(body.summary.timeAtSiteMin.hfville).toBe(ville);
+  });
+
+  test("/feed/daily carries the span fields too", async () => {
+    const res = await appNow(seededSpans()).handle(
+      new Request(`http://truck.local/feed/daily?date=${YMD_30}`, { headers: { authorization: "Bearer feed-secret" } }),
+    );
+    const body = (await res.json()) as Record<string, any>;
+    expect(body.stops[0].spanArriveAt).toBe(ARRIVE_29);
+    expect(body.stops[body.stops.length - 1].spanDepartAt).toBeNull();
+  });
+
+  test("/api/week is unaffected: no stops, and the same summary the day route gives", async () => {
+    const db = seededSpans();
+    const week = (await (await appNow(db).handle(staffReq(`/api/week/${YMD_30}`))).json()) as { days: Record<string, any>[] };
+    const day = (await (await appNow(db).handle(staffReq(`/api/day/${YMD_30}`))).json()) as Record<string, any>;
+    const entry = week.days[week.days.length - 1]!;
+    expect(entry.date).toBe(YMD_30);
+    expect(entry).not.toHaveProperty("stops");
+    expect(entry.summary).toEqual(day.summary);
+    expect(entry.findings).toEqual(day.findings);
+  });
+
+  test("dayReport without the option is identity: the week and range routes never look past the day", () => {
+    const deps = resolveDeps({ config: config(), now: () => NOW_30, sites: loadSites(), rules: loadRules() });
+    const plain = dayReport(seededSpans(), deps, YMD_30);
+    const first = plain.stops![0]!;
+    expect(first.spanArriveAt).toBe(first.arriveAt);
+    expect(first.spanArriveOpen).toBe(false);
+    expect(first.spanDepartAt).toBe(first.departAt);
+    const last = plain.stops![plain.stops!.length - 1]!;
+    expect(last.spanDepartAt).toBe(last.departAt);
+    const spanned = dayReport(seededSpans(), deps, YMD_30, { spans: true });
+    expect(spanned.stops![0]!.spanArriveAt).toBe(ARRIVE_29);
+  });
+
+  test("/day renders the true dates, the still-parked cell, the footnote and the heading dates", async () => {
+    const html = await (await appNow(seededSpans()).handle(staffReq(`/day/${YMD_30}`))).text();
+    expect(html).toContain(">29 ก.ย. 14:34</button>");
+    expect(html).toContain('<td title="ยังจอดอยู่ · still parked">ยังจอดอยู่</td>');
+    expect(html).toContain("* นับเฉพาะเวลาในวันนี้ · * minutes within this day only");
+    expect(html).toContain('<span class="hdate">30 ก.ย. 2026</span>');
+    expect(html).toContain('<span id="map-view-text">ทั้งวัน · 30 ก.ย. 2026</span>');
+  });
+
+  test("the day page's map-data carries a view for the stop that crossed midnight", async () => {
+    const html = await (await appNow(seededSpans()).handle(staffReq(`/day/${YMD_30}`))).text();
+    const m = /id="map-data"[^>]*>(.*?)<\/script>/s.exec(html);
+    const views = JSON.parse(m![1]!).views as Record<string, string>;
+    expect(views["stop-0"]).toMatch(/^HF Ville · 29 ก\.ย\. 14:34 – 30 ก\.ย\. \d\d:\d\d$/);
   });
 });

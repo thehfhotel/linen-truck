@@ -338,3 +338,51 @@ describe("summaryOnly", () => {
     expect(slim).toHaveProperty("dataQuality");
   });
 });
+
+// ── stop spans (§9, "Additive since 2026-09-30") ──────────────────────────────
+
+describe("the span fields on every stop", () => {
+  const RAW: Record<string, string>[] = rawRows as unknown as Record<string, string>[];
+  const POINTS: Point[] = RAW.map(pointFromRow).filter((p): p is Point => p !== null);
+  const summary = summarizeDay("2026-09-05", POINTS, loadSites(), loadRules());
+
+  test("with no spans they are the stop itself: identity, never open", () => {
+    const report = build(summary, { points: POINTS });
+    report.stops!.forEach((stop, i) => {
+      const s = summary.stops[i]!;
+      expect(stop.spanArriveAt).toBe(s.arrive);
+      expect(stop.spanArriveOpen).toBe(false);
+      expect(stop.spanDepartAt).toBe(s.depart);
+      expect(stop.spanEngineOffAt).toBe(s.engine.offAt);
+      expect(stop.spanEngineOnAt).toBe(s.engine.onAt);
+    });
+  });
+
+  test("with spans they are copied, and the day's own fields do not move", () => {
+    const plain = build(summary, { points: POINTS });
+    const spans = summary.stops.map((s) => ({
+      arriveAt: s.arrive - 3600,
+      arriveOpen: true,
+      departAt: null,
+      engineOffAt: s.arrive - 3000,
+      engineOnAt: null,
+    }));
+    const report = build(summary, { points: POINTS, spans });
+    report.stops!.forEach((stop, i) => {
+      expect(stop.spanArriveAt).toBe(spans[i]!.arriveAt);
+      expect(stop.spanArriveOpen).toBe(true);
+      expect(stop.spanDepartAt).toBeNull();
+      expect(stop.spanEngineOffAt).toBe(spans[i]!.engineOffAt);
+      expect(stop.spanEngineOnAt).toBeNull();
+      const { spanArriveAt, spanArriveOpen, spanDepartAt, spanEngineOffAt, spanEngineOnAt, ...old } = stop;
+      const { spanArriveAt: _a, spanArriveOpen: _b, spanDepartAt: _c, spanEngineOffAt: _d, spanEngineOnAt: _e, ...oldPlain } =
+        plain.stops![i]!;
+      void [spanArriveAt, spanArriveOpen, spanDepartAt, spanEngineOffAt, spanEngineOnAt, _a, _b, _c, _d, _e];
+      expect(old).toEqual(oldPlain);
+    });
+  });
+
+  test("summaryOnly still drops the stops, spans and all", () => {
+    expect(summaryOnly(build(summary, { points: POINTS })).stops).toBeUndefined();
+  });
+});

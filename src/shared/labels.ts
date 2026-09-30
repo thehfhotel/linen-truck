@@ -98,11 +98,19 @@ export const LABELS = {
   unknownPlace: { th: "ไม่รู้จัก", en: "Unknown" },
   trackStart: { th: "เริ่มบันทึก", en: "Track start" },
   trackEnd: { th: "จบบันทึก", en: "Track end" },
+  /** A stop with no departure in the data (stop spans, 2026-09-30). */
+  stillParked: { th: "ยังจอดอยู่", en: "still parked" },
+  /** Prefix on an arrival the data only bounds: the truck was already there when the window began. */
+  arrivedBefore: { th: "ก่อน", en: "before" },
+  /** The footnote under the stops table, for a `*` on a minutes cell. */
+  minutesWithinDay: { th: "* นับเฉพาะเวลาในวันนี้", en: "* minutes within this day only" },
 
   // ── map ───────────────────────────────────────────────────────────────────
   mapHeading: { th: "เส้นทาง", en: "Route" },
   mapUnavailable: { th: "ไม่มีข้อมูลเส้นทางของวันนี้", en: "No route data for this day" },
   allDayChip: { th: "ทั้งวัน", en: "All day" },
+  /** The line under the chips that says what the map is showing (2026-09-30). */
+  viewing: { th: "กำลังดู", en: "Viewing" },
   showTripOnMap: { th: "ดูเที่ยวนี้บนแผนที่", en: "Show this trip on the map" },
   showStopOnMap: { th: "ดูจุดนี้บนแผนที่", en: "Show this stop on the map" },
 

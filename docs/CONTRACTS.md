@@ -101,6 +101,10 @@ export function segment(points: Point[], sites: Site[], rules: Rules): { stops: 
 export function audit(ymd: string, seg: ReturnType<typeof segment>, points: Point[], sites: Site[], rules: Rules): Finding[]
 // src/domain/summary.ts
 export function summarizeDay(ymd: string, points: Point[], sites: Site[], rules: Rules): DaySummary
+// src/domain/span.ts   (stop spans, 2026-09-30 — see rule 9)
+export const SPAN_WINDOW_DAYS = 7
+export interface StopSpan { arriveAt: number; arriveOpen: boolean; departAt: number | null; engineOffAt: number | null; engineOnAt: number | null }
+export function stopSpans(dayPoints: Point[], windowPoints: Point[], dayStops: Stop[], sites: Site[], rules: Rules): StopSpan[]   // same length and order as dayStops
 // src/domain/sinotrackRow.ts
 export function pointFromRow(row: Record<string, string>): Point | null  // raw platform row → Point (parses Voltages= from strOther)
 ```
@@ -184,6 +188,18 @@ Rules (proven in the Python prototype, 2026-09-05):
 7. `roundTrips` = min(#legs hf→hfville, #legs hfville→hf). `firstDeparture` = the first trip's start (equivalently the first stop's
    departure, virtual book-end included), null on a day with no trip; `lastArrival` = arrive of the last non-virtual stop. `timeAtSiteS` sums non-virtual stop durations per site.
 8. Day window = Bangkok [00:00, 24:00) of `ymd`; points outside are ignored by `summarizeDay`.
+9. STOP SPANS (`stopSpans`, owner decision 2026-09-30): the day window clips a stop that crosses midnight (2026-09-30's first row read
+   `00:02 → 13:08` for a truck that parked on the 29th at 14:34; the last row read `→ 19:00` while it was still parked). A SPAN is the stop's
+   real extent, found in `windowPoints` = `[dayStart − SPAN_WINDOW_DAYS·86400, min(dayEnd + SPAN_WINDOW_DAYS·86400, now))` (7 days; the window is
+   loaded by the server, so `now` never enters the domain). It changes NO number of rules 1-8: `summarizeDay`, `minutes`, `timeAtSiteS` and every finding
+   stay the day's own. Default for every stop = itself (`arriveAt = arrive`, `arriveOpen = false`, `departAt = depart`, engine events as the stop
+   carries them); virtual book-ends always keep it. ONLY TWO STOPS MAY EXTEND, because the day is cut in exactly two places: the FIRST-BOUNDARY stop
+   (non-virtual, `arrive === dayPoints[0].t`) and the LAST-BOUNDARY stop (non-virtual, `depart === dayPoints[last].t`) — one stop when the day is spent
+   entirely parked. Every other stop keeps the default even where a wider segmentation would disagree: a mid-day row must never change because of the
+   window the report happened to load. Run `segment(windowPoints)` once and take the non-virtual window stop W with `W.arrive ≤ t ≤ W.depart` for the
+   boundary fix `t`; no W keeps the default. First boundary: `arriveAt = W.arrive`, `arriveOpen = (W.arrive === windowPoints[0].t)` (the window began inside
+   the stop, so the real arrival is at or before `arriveAt`), `engineOffAt = W.engine.offAt`. Last boundary: `departAt = W.depart`, or null when
+   `W.depart === windowPoints[last].t` (no departure in the data: still parked, or the data ends inside the stop), `engineOnAt = W.engine.onAt`.
 Expected on the fixture (rules above, sites above): 82 points after cleaning; 5 stops — a `track-start` book-end, then
 hfville 12:24–13:34, hf 13:48–14:06, hfville 14:18–14:22 and hfville 14:26–15:11; 4 trips totalling 15.35 km; legs:
 [hfville→hf (trip 2, 4.76 km), hf→hfville (trip 3, 6.74 km), hfville→hfville (trip 4, 0.37 km), all viaUnknownStops 0];
@@ -246,9 +262,9 @@ Auth: every route except `/healthz` and `/feed/*` requires a valid `Cf-Access-Jw
 | GET / | 302 → `/day/<today ymd>` |
 | GET /day/:ymd | HTML day report (see §8) |
 | GET /week/:ymd | HTML 7-day table ending at ymd |
-| GET /api/day/:ymd | DayReport JSON (§9) — used by the page's map script |
+| GET /api/day/:ymd | DayReport JSON (§9) — used by the page's map script; with stop spans (§3 rule 9) |
 | GET /api/week/:ymd | `{ days: DayReport[] }` 7 days ending at ymd (summary fields only, no trips/stops/path) |
-| GET /feed/daily?date=YYYY-MM-DD | DayReport JSON (§9), bearer-gated, internal only |
+| GET /feed/daily?date=YYYY-MM-DD | DayReport JSON (§9) with stop spans, bearer-gated, internal only |
 | GET /feed/range?from=&to= | `{ days: DayReport[] }` inclusive, max 62 days, summary fields only |
 | GET /robots.txt | `Disallow: /` |
 Invalid ymd → 400 JSON `{error:'bad-date'}`. Unknown route → 404.
@@ -261,6 +277,19 @@ Day page: header (date, prev/next day, week link), device line (last seen, volta
 engine state is unknown, engine-on minutes, engine off → on times `12:27 → 13:32` / `12:27 →` / `—`),
 a Leaflet map (CDN, integrity-pinned) drawing the day's path + site circles + stop markers (a stop popup repeats the badge and
 the engine times), fed by `/api/day/:ymd`.
+Since 2026-09-30 (stop spans, §3 rule 9): the stops table shows the TRUE arrival and departure WITH DATES on every row, `29 ก.ย. 14:34` (Bangkok, Thai
+short month), read from the `span*` fields — the arrive cell (still the row-select button) is prefixed `ก่อน ` when `spanArriveOpen`, and a stop with
+no departure in the data reads `ยังจอดอยู่` (`title` = `ยังจอดอยู่ · still parked`). The minutes column stays the day's own count, so the summary
+totals do not move; a row whose real extent runs past the day (`spanArriveAt < arriveAt`, or no departure, or `spanDepartAt > departAt`) gets a `*` on
+its minutes and the footnote `* นับเฉพาะเวลาในวันนี้ · * minutes within this day only` renders under the table (only when some row has one). The
+engine off → on cell keeps its rules (`—` with no off, `X →` with no on) with dated values. The Trips, Stops and Route headings each end with the
+viewed date in a muted `<span class="hdate">30 ก.ย. 2026</span>` (styled in the nonce'd style block, never a `style=` attribute). Under the
+map chips a line `กำลังดู · Viewing: …` (`<p class="viewing" id="map-view">`) names the date and time range of the current selection:
+`ทั้งวัน · 30 ก.ย. 2026`, `เที่ยว N · Trip N · 30 ก.ย. 13:46–13:54`, a detour leg's combined range, and for a stop its span — `HF Ville · 29 ก.ย. 14:34 –
+30 ก.ย. 13:08` (`30 ก.ย. 13:21–13:46` when both ends share a date, `… – ยังจอดอยู่` while parked, `ก่อน ` before an open arrival). The server
+precomputes one string per rendered `data-select` key into the page's `map-data` JSON (`views: { [key]: string }`, always with `all`, which is also the
+no-JS initial text); the ES5 map script sets `textContent` from it on every selection change, the hash applied on load included, and falls back to
+`views.all` for an unknown key.
 Week page: one row per day (date link, km, trips, round trips, first departure, last arrival, findings by kind, points).
 Labels live in `src/shared/labels.ts` as `{ th, en }` pairs (`L`), rendered as "ไทย · English".
 Branding: HF One staff burgundy like feedback's /staff (not the crimson guest palette). Mobile-first, works on a phone.
@@ -293,6 +322,14 @@ finding carries `engine` and `engineOffMin`, and its `text` gains the status suf
 en `, engine running` / `, engine off`, and NO suffix when the kind is `unknown` (no voltage, no claim). `engineOnMin` is
 unchanged. hf-mcp reads `findingCount` generically and prints `text`, so nothing there needs a change. Day page selection is
 mirrored in the URL hash (`#all`, `#trip-N`, `#trip-N-M` for a detour leg, `#stop-I`) and applied on load.
+Additive since 2026-09-30 (stop spans, §3 rule 9): every stop carries five more fields, always present — `spanArriveAt` (epoch s, the real
+arrival), `spanArriveOpen` (boolean: the data window began inside the stop, so the real arrival is at or before `spanArriveAt`), `spanDepartAt`
+(epoch s, or null when there is no departure in the data), `spanEngineOffAt` and `spanEngineOnAt` (epoch s or null — epochs, unlike the `HH:MM`
+`engineOffAt`/`engineOnAt`, so a consumer can date them). ONLY the stop that begins on the day's first fix and the stop that ends on its last fix can
+differ from the stop's own `arriveAt`/`departAt`/engine times; every other stop, and both virtual book-ends, carries them unchanged (`spanArriveOpen:
+false`). `arrive`, `depart`, `arriveAt`, `departAt`, `minutes`, the engine fields and the findings are exactly as before — `minutes` and the summary
+count only the day. `/api/day` and `/feed/daily` (and the page) fill the spans from a window of ±7 days; `/api/week` and `/feed/range` strip the stops, so
+they never load it, and a report built without spans reports each stop as its own span.
 Rounding happens only in the report layer: km to 1 dp, ratio to 2 dp of the unrounded quotient, minutes floored.
 
 ## 10. Scripts (rev 2)

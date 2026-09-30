@@ -29,12 +29,15 @@
 
 import { Elysia } from "elysia";
 import type { Database } from "bun:sqlite";
+import type { StopSpan } from "../domain/span.ts";
 import type { Rules, Site } from "../domain/types.ts";
+import { cleanPoints } from "../domain/segment.ts";
+import { SPAN_WINDOW_DAYS, stopSpans } from "../domain/span.ts";
 import { summarizeDay } from "../domain/summary.ts";
 import { addBangkokDays, bangkokDay } from "../shared/time.ts";
 import { authenticateStaff } from "./auth.ts";
 import { loadConfig, sinotrackConfigured, type Config } from "./config.ts";
-import { getDeviceStatus, latestPoll, pointsForDay } from "./db.ts";
+import { bangkokDaySeconds, getDeviceStatus, latestPoll, pointsBetween, pointsForDay } from "./db.ts";
 import type { PollerStatus } from "./poller.ts";
 import { renderDayPage } from "./pages/day.ts";
 import { newNonce, pageHeaders } from "./pages/layout.ts";
@@ -126,11 +129,25 @@ export const todayYmd = (deps: Deps): string => bangkokDay(deps.now().toISOStrin
  * One day, end to end: stored points → the pure domain summary → the §9 wire
  * shape. Every route that answers with numbers goes through here, which is why
  * the week table and the day page can never disagree.
+ *
+ * `spans: true` also loads `SPAN_WINDOW_DAYS` either side of the day (never past
+ * `now`) and fills the stops' `span*` fields with their real, cross-midnight
+ * extent (§3 "Stop spans"). Only the three routes that SHOW stops ask for it; the
+ * week and range routes strip stops anyway, so they do not pay for the window.
  */
-export function dayReport(db: Database, deps: Deps, ymd: string): DayReport {
+export function dayReport(db: Database, deps: Deps, ymd: string, opts?: { spans?: boolean }): DayReport {
   const teid = deps.config.sinotrackTeid;
   const points = pointsForDay(db, teid, ymd);
   const summary = summarizeDay(ymd, points, deps.sites, deps.rules);
+  const nowS = Math.floor(deps.now().getTime() / 1000);
+  let spans: StopSpan[] | undefined;
+  if (opts?.spans) {
+    const { from, to } = bangkokDaySeconds(ymd);
+    const windowPoints = cleanPoints(
+      pointsBetween(db, teid, from - SPAN_WINDOW_DAYS * 86400, Math.min(to + SPAN_WINDOW_DAYS * 86400, nowS + 1)),
+    );
+    spans = stopSpans(cleanPoints(points), windowPoints, summary.stops, deps.sites, deps.rules);
+  }
   return buildDayReport({
     teid,
     summary,
@@ -140,7 +157,8 @@ export function dayReport(db: Database, deps: Deps, ymd: string): DayReport {
     status: getDeviceStatus(db, teid),
     poll: latestPoll(db),
     pollerConfigured: deps.pollerStatus().configured,
-    generatedAt: Math.floor(deps.now().getTime() / 1000),
+    generatedAt: nowS,
+    ...(spans ? { spans } : {}),
   });
 }
 
@@ -238,7 +256,7 @@ export function createApp(db: Database, partial?: Partial<Deps>): Elysia {
     if (refusal) return refusal;
     const date = new URL(request.url).searchParams.get("date") ?? "";
     if (!isYmd(date)) return fail("bad-date", 400);
-    return json(dayReport(db, deps, date));
+    return json(dayReport(db, deps, date, { spans: true }));
   });
 
   app.get("/feed/range", ({ request }) => {
@@ -291,7 +309,7 @@ export function createApp(db: Database, partial?: Partial<Deps>): Elysia {
     const today = todayYmd(deps);
     const nonce = newNonce();
     const html = renderDayPage({
-      report: dayReport(db, deps, ymd),
+      report: dayReport(db, deps, ymd, { spans: true }),
       sites: deps.sites,
       nonce,
       prevYmd: addBangkokDays(ymd, -1),
@@ -324,7 +342,7 @@ export function createApp(db: Database, partial?: Partial<Deps>): Elysia {
     if (refusal) return refusal;
     const ymd = String(params.ymd);
     if (!isYmd(ymd)) return fail("bad-date", 400);
-    return json(dayReport(db, deps, ymd));
+    return json(dayReport(db, deps, ymd, { spans: true }));
   });
 
   app.get("/api/week/:ymd", async ({ request, params }) => {
