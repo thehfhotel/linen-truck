@@ -28,7 +28,7 @@ import { bangkokDayBounds } from "../shared/time.ts";
 
 // ── schema (§5, verbatim) ───────────────────────────────────────────────────
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const SCHEMA_V1 = `
 CREATE TABLE points (teid TEXT NOT NULL, t INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, speed INTEGER NOT NULL,
@@ -51,6 +51,13 @@ CREATE TABLE tile_usage (ymd TEXT PRIMARY KEY, upstream INTEGER NOT NULL DEFAULT
 CREATE TABLE map_session (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
 `;
 
+// v3: the session is reused only if it was created with the CURRENT createSession
+// request. `params` is that request as JSON; rows from before the migration get ''
+// and so never match, which retires a session made without the business-POI style.
+const SCHEMA_V3 = `
+ALTER TABLE map_session ADD COLUMN params TEXT NOT NULL DEFAULT '';
+`;
+
 /** Replays from the stored `PRAGMA user_version`; safe to call on every open. */
 export function migrate(db: Database): void {
   const row = db.query("PRAGMA user_version").get() as { user_version: number };
@@ -59,6 +66,7 @@ export function migrate(db: Database): void {
   db.transaction(() => {
     if (current < 1) db.run(SCHEMA_V1);
     if (current < 2) db.run(SCHEMA_V2);
+    if (current < 3) db.run(SCHEMA_V3);
     db.run(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   })();
 }
@@ -498,21 +506,24 @@ export interface MapSession {
   /** Epoch seconds, from Google's `expiry`. */
   expiresAt: number;
   createdAt: number;
+  /** The createSession request body (JSON) this session was made with; '' for a pre-v3 row. */
+  params: string;
 }
 
 export function getMapSession(db: Database): MapSession | null {
-  const row = db.query("SELECT token, expires_at, created_at FROM map_session WHERE id = 1").get() as
-    | { token: string; expires_at: number; created_at: number }
+  const row = db.query("SELECT token, expires_at, created_at, params FROM map_session WHERE id = 1").get() as
+    | { token: string; expires_at: number; created_at: number; params: string }
     | null;
-  return row ? { token: row.token, expiresAt: row.expires_at, createdAt: row.created_at } : null;
+  return row ? { token: row.token, expiresAt: row.expires_at, createdAt: row.created_at, params: row.params } : null;
 }
 
 /** The single session row (id = 1): replaced on every renewal. */
-export function setMapSession(db: Database, token: string, expiresAt: number, createdAt: number): void {
+export function setMapSession(db: Database, token: string, expiresAt: number, createdAt: number, params: string): void {
   db.query(
-    `INSERT INTO map_session (id, token, expires_at, created_at) VALUES (1,?,?,?)
-     ON CONFLICT(id) DO UPDATE SET token = excluded.token, expires_at = excluded.expires_at, created_at = excluded.created_at`,
-  ).run(token, expiresAt, createdAt);
+    `INSERT INTO map_session (id, token, expires_at, created_at, params) VALUES (1,?,?,?,?)
+     ON CONFLICT(id) DO UPDATE SET token = excluded.token, expires_at = excluded.expires_at, created_at = excluded.created_at,
+       params = excluded.params`,
+  ).run(token, expiresAt, createdAt, params);
 }
 
 export function clearMapSession(db: Database): void {

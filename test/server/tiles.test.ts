@@ -22,6 +22,8 @@ import {
 import {
   createTileService,
   parseCacheControl,
+  SESSION_REQUEST,
+  SESSION_STYLE_VERSION,
   TILE_CACHE_MAX_BYTES,
   type TileResult,
   type TileService,
@@ -252,7 +254,12 @@ describe("a miss, a store and a hit", () => {
     expect(create!.method).toBe("POST");
     expect(create!.url).toBe(`https://tile.googleapis.com/v1/createSession?key=${KEY}`);
     expect(create!.headers["content-type"]).toBe("application/json");
-    expect(JSON.parse(create!.body!)).toEqual({ mapType: "roadmap", language: "th", region: "TH" });
+    expect(JSON.parse(create!.body!)).toEqual({
+      mapType: "roadmap",
+      language: "th",
+      region: "TH",
+      styles: [{ featureType: "poi.business", stylers: [{ visibility: "on" }] }],
+    });
     expect(tile!.method).toBe("GET");
     expect(tile!.url).toBe(`https://tile.googleapis.com/v1/2dtiles/12/3200/1900?session=${SESSION}&key=${KEY}`);
 
@@ -503,6 +510,8 @@ describe("in-flight dedupe", () => {
 
 // ── the session ─────────────────────────────────────────────────────────────
 
+const PARAMS = JSON.stringify(SESSION_REQUEST);
+
 describe("the session token", () => {
   test("created lazily once, persisted, and reused across tiles", async () => {
     expect(h.sessionCalls()).toHaveLength(0);
@@ -524,8 +533,50 @@ describe("the session token", () => {
     expect(h.tileCalls()[0]!.url).toContain(`session=${SESSION}`);
   });
 
+  test("createSession asks for business POIs to be on (the styles array is in the request body)", async () => {
+    await h.service.getTile(3, 1, 1);
+    const body = JSON.parse(h.sessionCalls()[0]!.body!);
+    expect(body.styles).toEqual([{ featureType: "poi.business", stylers: [{ visibility: "on" }] }]);
+    expect(body.mapType).toBe("roadmap");
+    expect(body.language).toBe("th");
+    expect(body.region).toBe("TH");
+  });
+
+  test("the created session stores the request it was made with, in params", async () => {
+    await h.service.getTile(3, 1, 1);
+    expect(getMapSession(h.db)!.params).toBe(PARAMS);
+  });
+
+  test("a stored session made with different params is NOT reused; a new one replaces the row", async () => {
+    setMapSession(h.db, "old-token", h.nowS + 14 * 86400, h.nowS - 1000, JSON.stringify({ mapType: "roadmap", language: "th", region: "TH" }));
+    h.validSessions.add("old-token");
+    await h.service.getTile(3, 1, 1);
+    expect(h.sessionCalls()).toHaveLength(1);
+    expect(h.tileCalls()[0]!.url).toContain(`session=${SESSION}`);
+    expect(h.tileCalls()[0]!.url).not.toContain("old-token");
+    const row = getMapSession(h.db)!;
+    expect(row.token).toBe(SESSION);
+    expect(row.params).toBe(PARAMS);
+  });
+
+  test("a pre-migration session (params '') is NOT reused", async () => {
+    setMapSession(h.db, "old-token", h.nowS + 14 * 86400, h.nowS - 1000, "");
+    h.validSessions.add("old-token");
+    await h.service.getTile(3, 1, 1);
+    expect(h.sessionCalls()).toHaveLength(1);
+    expect(h.tileCalls()[0]!.url).not.toContain("old-token");
+  });
+
+  test("a stored session with matching params IS reused", async () => {
+    setMapSession(h.db, "old-token", h.nowS + 14 * 86400, h.nowS - 1000, PARAMS);
+    h.validSessions.add("old-token");
+    await h.service.getTile(3, 1, 1);
+    expect(h.sessionCalls()).toHaveLength(0);
+    expect(h.tileCalls()[0]!.url).toContain("session=old-token");
+  });
+
   test("renewed when less than a day is left", async () => {
-    setMapSession(h.db, "old-token", h.nowS + 86400 - 1, h.nowS - 1000);
+    setMapSession(h.db, "old-token", h.nowS + 86400 - 1, h.nowS - 1000, PARAMS);
     h.validSessions.add("old-token");
     await h.service.getTile(3, 1, 1);
     expect(h.sessionCalls()).toHaveLength(1);
@@ -534,7 +585,7 @@ describe("the session token", () => {
   });
 
   test("not renewed with exactly a day left", async () => {
-    setMapSession(h.db, "old-token", h.nowS + 86400, h.nowS - 1000);
+    setMapSession(h.db, "old-token", h.nowS + 86400, h.nowS - 1000, PARAMS);
     h.validSessions.add("old-token");
     await h.service.getTile(3, 1, 1);
     expect(h.sessionCalls()).toHaveLength(0);
@@ -811,5 +862,19 @@ describe("SECRET HYGIENE", () => {
     t.name = "TimeoutError";
     h.throwOnFetch = t;
     expect((await h.service.getTile(1, 0, 0)).kind).toBe("upstream-error");
+  });
+});
+
+// ── the style version ───────────────────────────────────────────────────────
+
+describe("SESSION_STYLE_VERSION", () => {
+  test("is the first 8 hex chars of the SHA-256 of the session request JSON", () => {
+    const { createHash } = require("node:crypto") as typeof import("node:crypto");
+    expect(SESSION_STYLE_VERSION).toMatch(/^[0-9a-f]{8}$/);
+    expect(SESSION_STYLE_VERSION).toBe(createHash("sha256").update(JSON.stringify(SESSION_REQUEST)).digest("hex").slice(0, 8));
+  });
+
+  test("is pinned: changing the session request must change it (and this test, deliberately)", () => {
+    expect(SESSION_STYLE_VERSION).toBe("c3d38d26");
   });
 });

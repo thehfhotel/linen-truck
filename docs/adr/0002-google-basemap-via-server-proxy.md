@@ -67,6 +67,17 @@ byte for byte. The change deploys with the secret unset; the owner adds
 `TRUCK_GOOGLE_MAPS_KEY` later and the next deploy turns it on. The CI payload
 step already drops empty values.
 
+**Business POIs on (2026-09-30).** The default roadmap hides most business POIs.
+A live probe compared a default session with one whose `createSession` body carried
+`styles: [{ featureType: "poi.business", stylers: [{ visibility: "on" }] }]`: on the
+same z17 and z18 tiles the styled one showed shop, restaurant and pharmacy names and
+the default showed none. Styles live in the session request and session calls are
+not billed, so this costs nothing. Styling cannot change POI density per zoom: shops
+still appear only from about z17. The session row stores the request it was made
+with (`map_session.params`) and is reused only when that matches, and the tile URL
+carries `?v=<hash of the request>` because Google's tiles are `private,
+max-age=86400` and a browser would otherwise keep the old unstyled tiles for a day.
+
 **5. Attribution and Terms notices are part of the feature.** The Google Maps
 logo (the official asset, unmodified, embedded as a data URI) sits bottom-left,
 18 px high with the required clear space, never overlapping Leaflet's

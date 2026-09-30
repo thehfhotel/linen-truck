@@ -31,6 +31,7 @@
 // fake fetch and no network.
 
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { bangkokDay } from "../shared/time.ts";
@@ -53,8 +54,29 @@ import {
 
 const GOOGLE_ORIGIN = "https://tile.googleapis.com";
 
-/** createSession body (§7). Thai labels, Thai region: the audience is a Surat Thani hotel. */
-export const SESSION_REQUEST = { mapType: "roadmap", language: "th", region: "TH" } as const;
+/**
+ * createSession body (§7). Thai labels, Thai region: the audience is a Surat Thani
+ * hotel. `styles` turns business POIs on: the default roadmap hides most shops,
+ * restaurants and pharmacies (ADR 0002, probe of 2026-09-30). Styles live in the
+ * session, and session calls are not billed.
+ */
+export const SESSION_REQUEST = {
+  mapType: "roadmap",
+  language: "th",
+  region: "TH",
+  styles: [{ featureType: "poi.business", stylers: [{ visibility: "on" }] }],
+} as const;
+
+/** The exact string stored beside a session and compared on reuse. */
+const SESSION_PARAMS = JSON.stringify(SESSION_REQUEST);
+
+/**
+ * A short, stable hash of the session request: 8 hex chars of its SHA-256. The day
+ * page puts it on the tile URL (`/tiles/{z}/{x}/{y}?v=…`) so a browser that holds
+ * day-old tiles of an older style (Google sends `private, max-age=86400`) asks
+ * again. The route ignores the query.
+ */
+export const SESSION_STYLE_VERSION = createHash("sha256").update(SESSION_PARAMS).digest("hex").slice(0, 8);
 
 /** A session is renewed when less than this is left (Google's own lifetime is two weeks). */
 export const SESSION_RENEW_MARGIN_S = 86_400;
@@ -267,7 +289,7 @@ export function createTileService(opts: TileServiceOptions): TileService {
       res = await doFetch(`${GOOGLE_ORIGIN}/v1/createSession?key=${key}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(SESSION_REQUEST),
+        body: SESSION_PARAMS,
         signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       });
     } catch (err) {
@@ -293,15 +315,19 @@ export function createTileService(opts: TileServiceOptions): TileService {
     // `expiry` is epoch seconds in a STRING.
     const expiry = Number(parsed.expiry);
     const expiresAt = Number.isFinite(expiry) && expiry > now ? Math.floor(expiry) : now + SESSION_FALLBACK_LIFETIME_S;
-    setMapSession(db, parsed.session, expiresAt, now);
+    setMapSession(db, parsed.session, expiresAt, now, SESSION_PARAMS);
     log("tiles: session created");
     return parsed.session;
   }
 
-  /** The current token, created lazily and renewed inside the last day of its life. */
+  /**
+   * The current token, created lazily and renewed inside the last day of its life.
+   * A stored token is reused only if it was made with the CURRENT session request
+   * (a session created before the style change has other `params`, and is replaced).
+   */
   async function currentSession(): Promise<string> {
     const row = getMapSession(db);
-    if (row && row.expiresAt - nowS() >= SESSION_RENEW_MARGIN_S) return row.token;
+    if (row && row.params === SESSION_PARAMS && row.expiresAt - nowS() >= SESSION_RENEW_MARGIN_S) return row.token;
     sessionInflight ??= createSession().finally(() => {
       sessionInflight = null;
     });

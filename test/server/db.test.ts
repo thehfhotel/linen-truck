@@ -214,7 +214,7 @@ describe("the tile proxy tables (schema v2)", () => {
     const fresh = openDatabase(":memory:");
     const tables = (fresh.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name);
     expect(tables).toEqual(expect.arrayContaining(["tile_cache", "tile_usage", "map_session"]));
-    expect((fresh.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2);
+    expect((fresh.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3);
   });
 
   test("a v1 database (points already there) upgrades without losing rows", async () => {
@@ -232,7 +232,33 @@ describe("the tile proxy tables (schema v2)", () => {
     expect((db.query("SELECT COUNT(*) AS c FROM points").get() as { c: number }).c).toBe(1);
     expect(getTileMeta(db, 1, 1, 1)).toBeNull();
     migrate(db); // idempotent
-    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2);
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3);
+  });
+
+  test("migration v3 adds map_session.params to a v2 database; the existing row gets ''", async () => {
+    const { Database } = await import("bun:sqlite");
+    const { migrate } = await import("../../src/server/db.ts");
+    const db = new Database(":memory:");
+    // A database exactly as it was at v2: v1 tables (only the ones this test needs) and the OLD map_session.
+    db.run("CREATE TABLE points (teid TEXT NOT NULL, t INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, speed INTEGER NOT NULL, direction INTEGER, mileage_m INTEGER, car_state INTEGER, te_state INTEGER, alarm_state INTEGER, voltage REAL, other TEXT, fetched_at INTEGER NOT NULL, PRIMARY KEY (teid, t)) WITHOUT ROWID");
+    db.run("CREATE TABLE device_status (teid TEXT PRIMARY KEY, t INTEGER, lat REAL, lon REAL, speed INTEGER, mileage_m INTEGER, voltage REAL, park_since INTEGER, run_since INTEGER, fetched_at INTEGER NOT NULL)");
+    db.run("CREATE TABLE daily_mileage (teid TEXT NOT NULL, ymd TEXT NOT NULL, mileage_m INTEGER NOT NULL, fetched_at INTEGER NOT NULL, PRIMARY KEY (teid, ymd))");
+    db.run("CREATE TABLE obd_rows (teid TEXT NOT NULL, t INTEGER NOT NULL, obd TEXT NOT NULL, fetched_at INTEGER NOT NULL, PRIMARY KEY (teid, t))");
+    db.run("CREATE TABLE poll_log (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, ok INTEGER NOT NULL, points_seen INTEGER, points_new INTEGER, error TEXT)");
+    db.run("CREATE TABLE tile_cache (z INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, fetched_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, etag TEXT, content_type TEXT NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY (z, x, y)) WITHOUT ROWID");
+    db.run("CREATE TABLE tile_usage (ymd TEXT PRIMARY KEY, upstream INTEGER NOT NULL DEFAULT 0, hits INTEGER NOT NULL DEFAULT 0)");
+    db.run("CREATE TABLE map_session (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)");
+    db.run("INSERT INTO map_session VALUES (1, 'old-tok', 900, 100)");
+    db.run("PRAGMA user_version = 2");
+    migrate(db);
+    const cols = (db.query("PRAGMA table_info(map_session)").all() as { name: string; notnull: number; dflt_value: string | null }[]);
+    const params = cols.find((c) => c.name === "params");
+    expect(params).toBeDefined();
+    expect(params!.notnull).toBe(1);
+    expect(getMapSession(db)).toEqual({ token: "old-tok", expiresAt: 900, createdAt: 100, params: "" });
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3);
+    migrate(db); // idempotent: no second ADD COLUMN
+    expect(getMapSession(db)!.params).toBe("");
   });
 
   test("tile meta: upsert, read back, replace on the same z/x/y, delete", () => {
@@ -270,9 +296,9 @@ describe("the tile proxy tables (schema v2)", () => {
   test("map session: a single row, replaced, cleared", () => {
     const db = openDatabase(":memory:");
     expect(getMapSession(db)).toBeNull();
-    setMapSession(db, "tok-1", 500, 100);
-    setMapSession(db, "tok-2", 900, 200);
-    expect(getMapSession(db)).toEqual({ token: "tok-2", expiresAt: 900, createdAt: 200 });
+    setMapSession(db, "tok-1", 500, 100, "p1");
+    setMapSession(db, "tok-2", 900, 200, "p2");
+    expect(getMapSession(db)).toEqual({ token: "tok-2", expiresAt: 900, createdAt: 200, params: "p2" });
     expect((db.query("SELECT COUNT(*) AS c FROM map_session").get() as { c: number }).c).toBe(1);
     clearMapSession(db);
     expect(getMapSession(db)).toBeNull();

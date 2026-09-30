@@ -19,7 +19,7 @@ import { GOOGLE_LOGO_DATA_URI } from "../../src/server/pages/googleLogo.ts";
 import { escapeHtml, pageHeaders } from "../../src/server/pages/layout.ts";
 import { buildDayReport } from "../../src/server/report.ts";
 import { loadRules, loadSites } from "../../src/server/siteConfig.ts";
-import type { MapStatus, TileService } from "../../src/server/tiles.ts";
+import { SESSION_STYLE_VERSION, type MapStatus, type TileService } from "../../src/server/tiles.ts";
 import { LABELS, pair } from "../../src/shared/labels.ts";
 import rawRows from "../fixtures/2026-09-05.raw.json";
 
@@ -108,6 +108,7 @@ describe("OSM mode is today's page", () => {
     const html = page();
     expect(html).toContain("'https://tile.openstreetmap.org/{z}/{x}/{y}.png'");
     expect(html).not.toContain("/tiles/{z}/{x}/{y}");
+    expect(html).not.toContain("?v=");
     expect(html).not.toContain("map-note");
     expect(html).not.toContain("Google Maps");
     expect(html).not.toContain("policies.google.com");
@@ -137,6 +138,12 @@ describe("Google mode", () => {
     expect(html).toContain("/tiles/{z}/{x}/{y}");
     expect(html).toContain("maxZoom: 19");
     expect(html).toContain("tileSize: 256");
+  });
+
+  test("the tile template carries ?v=<style version> so browsers drop tiles of an older style", () => {
+    expect(SESSION_STYLE_VERSION).toMatch(/^[0-9a-f]{8}$/);
+    expect(html).toContain(`/tiles/{z}/{x}/{y}?v=${SESSION_STYLE_VERSION}`);
+    expect(mapScript("google")).toContain(`'/tiles/{z}/{x}/{y}?v=${SESSION_STYLE_VERSION}'`);
   });
 
   test("map-data carries the basemap, the attribution endpoint and the logo", () => {
@@ -443,7 +450,7 @@ describe("MAP_SCRIPT in Google mode, on a fake DOM", () => {
   test("creates exactly one tile layer, on our /tiles route, and never an OSM one", async () => {
     const run = await runGoogleScript();
     expect(run.layers).toHaveLength(1);
-    expect(run.layers[0]!.url).toBe("/tiles/{z}/{x}/{y}");
+    expect(run.layers[0]!.url).toBe(`/tiles/{z}/{x}/{y}?v=${SESSION_STYLE_VERSION}`);
     expect(run.layers[0]!.opts).toEqual({ maxZoom: 19, tileSize: 256 });
     for (const l of run.layers) expect(JSON.stringify(l).toLowerCase()).not.toContain("openstreetmap");
   });
