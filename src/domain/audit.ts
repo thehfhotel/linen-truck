@@ -8,6 +8,7 @@
 
 import { engineOnMask } from "./engine.ts";
 import { haversineM } from "./geo.ts";
+import { trackerFindings } from "./power.ts";
 import { bangkokMinuteOfDay, parseHhMm } from "./clock.ts";
 import type { Finding, Point, Rules, Site, Stop } from "./types.ts";
 import type { segment } from "./segment.ts";
@@ -112,8 +113,10 @@ function outsideHours(points: Point[], rules: Rules, engineOn: boolean[]): Findi
 }
 
 /**
- * All findings for one day, grouped by kind (unknown stops, detours, outside
- * hours) and chronological within a kind — the order the day page renders them.
+ * All findings for one day, grouped by kind and chronological within a kind — the
+ * order the day page renders them. The tracker-power and tracker-alarm findings
+ * (§3 rule 11) come FIRST, being the most urgent; then unknown stops, detours and
+ * outside hours as they always were.
  * `ymd` and `sites` are part of the locked signature (§3) and are not needed by
  * the current rules: the segmentation has already resolved every site id.
  */
@@ -127,5 +130,9 @@ export function audit(
   void ymd;
   void sites;
   const engineOn = engineOnMask(points, rules);
-  return [...unknownStops(seg.stops, rules), ...detours(seg.legs, rules), ...outsideHours(points, rules, engineOn)];
+  return [
+    ...trackerFindings(points, rules),
+    ...unknownStops(seg.stops, rules), ...detours(seg.legs, rules),
+    ...outsideHours(points, rules, engineOn),
+  ];
 }

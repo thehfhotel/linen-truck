@@ -18,7 +18,7 @@ const dash = "—";
 
 const pairHtml = (l: L): string => `${escapeHtml(l.th)} <span class="pair-en">· ${escapeHtml(l.en)}</span>`;
 
-const KINDS: readonly FindingKind[] = ["unknown-stop", "detour", "outside-hours"];
+const KINDS: readonly FindingKind[] = ["tracker-power", "tracker-alarm", "unknown-stop", "detour", "outside-hours"];
 
 /** `จอดที่ไม่รู้จัก 1 · อ้อมทาง 1`, or a dash when the day is clean. */
 function findingsCell(report: DayReport): string {

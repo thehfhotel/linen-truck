@@ -37,6 +37,7 @@ export const DEFAULT_RULES: Rules = Object.freeze({
   engineHoldS: 300,
   jitterRadiusM: 600,
   gapS: 300,
+  unpluggedVolts: 10,
 });
 
 /** Where the shipped files live inside the image (`WORKDIR/config`). */
@@ -111,6 +112,8 @@ export function loadRules(dir: string = configDir()): Rules {
   base.engineHoldS = num(r.engineHoldS, base.engineHoldS);
   base.jitterRadiusM = num(r.jitterRadiusM, base.jitterRadiusM);
   base.gapS = num(r.gapS, base.gapS);
+  // `unpluggedVolts` (§3 rule 11) joins them the same way: an older rules.json keeps 10.
+  base.unpluggedVolts = num(r.unpluggedVolts, base.unpluggedVolts);
 
   if (typeof r.schedule === "object" && r.schedule !== null) {
     const s = r.schedule as Record<string, unknown>;

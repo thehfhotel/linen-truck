@@ -211,6 +211,8 @@ interface PointDbRow {
   lon: number;
   speed: number;
   voltage: number | null;
+  te_state: number | null;
+  alarm_state: number | null;
 }
 
 const toPoint = (r: PointDbRow): Point => ({
@@ -219,12 +221,15 @@ const toPoint = (r: PointDbRow): Point => ({
   lon: r.lon,
   speed: r.speed,
   voltage: r.voltage === null ? null : r.voltage,
+  // The vendor's status words, for the tracker-power findings (§3 rule 11).
+  alarm: r.alarm_state,
+  teState: r.te_state,
 });
 
 /** Ordered `[fromS, toS)` — half-open, the same shape every range query has. */
 export function pointsBetween(db: Database, teid: string, fromS: number, toS: number): Point[] {
   const rows = db
-    .query("SELECT t, lat, lon, speed, voltage FROM points WHERE teid = ? AND t >= ? AND t < ? ORDER BY t ASC")
+    .query("SELECT t, lat, lon, speed, voltage, te_state, alarm_state FROM points WHERE teid = ? AND t >= ? AND t < ? ORDER BY t ASC")
     .all(teid, Math.floor(fromS), Math.floor(toS)) as PointDbRow[];
   return rows.map(toPoint);
 }

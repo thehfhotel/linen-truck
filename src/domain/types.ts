@@ -13,13 +13,22 @@
 
 import type { Gap } from "./gaps.ts";
 
-/** One GPS fix. `t` = epoch seconds, `speed` = km/h, `voltage` = volts or null. */
+/**
+ * One GPS fix. `t` = epoch seconds, `speed` = km/h, `voltage` = volts or null.
+ *
+ * `alarm` and `teState` are the vendor's own `nAlarmState` and `nTEState` words
+ * (§3 rule 11, tracker power). OPTIONAL so a hand-made fix that says nothing about
+ * them stays valid, and `undefined` reads exactly like `null`: unknown, never "clear".
+ * `nTEState` uses bit 31, so read both with UNSIGNED operators (`>>> 0`).
+ */
 export interface Point {
   t: number;
   lat: number;
   lon: number;
   speed: number;
   voltage: number | null;
+  alarm?: number | null;
+  teState?: number | null;
 }
 
 /** A known place, from `config/sites.json`. `radiusM` is the geofence. */
@@ -70,6 +79,13 @@ export interface Rules {
    * ~60 s.
    */
   gapS: number;
+  /**
+   * Supply volts strictly below which a fix reads "supply collapsed" — one leg of
+   * the tracker-power finding (§3 rule 11). The lowest reading in 25 days of
+   * production data is 11.5 V and the units are specified from 9-10 V up, so a
+   * real reading under this is a collapsed supply, not a quiet day.
+   */
+  unpluggedVolts: number;
 }
 
 /**
@@ -140,6 +156,9 @@ export interface Leg {
   viaUnknownStops: number;
 }
 
+/** Why one fix reads "the tracker may have lost its supply" (§3 rule 11), in the fixed order the findings list them. */
+export type PowerReason = "battery" | "power-cut" | "on-battery" | "shutdown" | "low-supply";
+
 /** Something the owner should look at. Rendered by the report layer (§9). */
 export type Finding =
   | {
@@ -154,7 +173,32 @@ export type Finding =
       engineOffS: number;
     }
   | { kind: "detour"; leg: Leg; referenceKm: number; ratio: number }
-  | { kind: "outside-hours"; start: number; end: number; km: number };
+  | { kind: "outside-hours"; start: number; end: number; km: number }
+  | {
+      kind: "tracker-power";
+      start: number;
+      end: number;
+      /** Union over the run, in `PowerReason` order. */
+      reasons: PowerReason[];
+      /** Lowest battery byte over the run's `battery` fixes; null when none carried that reason. */
+      minBatteryPct: number | null;
+      /** Lowest supply volts over the run's `low-supply` fixes; null when none carried that reason. */
+      minVoltage: number | null;
+      /** FLAGGED fixes in the run (neutral stored rows do not count). */
+      fixes: number;
+      lat: number;
+      lon: number;
+    }
+  | {
+      kind: "tracker-alarm";
+      start: number;
+      end: number;
+      /** `nAlarmState` with the power-cut bit (8) masked off, unsigned; never 0. */
+      code: number;
+      fixes: number;
+      lat: number;
+      lon: number;
+    };
 
 /** The whole of one Bangkok day, unrounded — the report layer does the rounding. */
 export interface DaySummary {

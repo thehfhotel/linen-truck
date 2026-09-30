@@ -217,7 +217,7 @@ describe("/api/day/:ymd", () => {
     expect(body.summary.roundTrips).toBe(1);
     expect(body.summary.km).toBe(15.4);
     expect(body.summary.timeAtSiteMin).toEqual({ hf: 18, hfville: 118 });
-    expect(body.summary.findingCount).toEqual({ "unknown-stop": 0, detour: 1, "outside-hours": 0 });
+    expect(body.summary.findingCount).toEqual({ "unknown-stop": 0, detour: 1, "outside-hours": 0, "tracker-power": 0, "tracker-alarm": 0 });
     expect(body.summary.firstDeparture).toMatch(/^\d{2}:\d{2}$/);
 
     expect(body.trips).toHaveLength(4);

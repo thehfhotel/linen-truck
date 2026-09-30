@@ -28,8 +28,11 @@ export const pick = (l: L, lang: Lang): string => (lang === "en" ? l.en : l.th);
 /** The one rendering the pages use: `ไทย · English`. */
 export const pair = (l: L): string => `${l.th} · ${l.en}`;
 
-/** The three finding kinds, spelled here so this file needs no domain import. */
-export type FindingKind = "unknown-stop" | "detour" | "outside-hours";
+/** The finding kinds, spelled here so this file needs no domain import. */
+export type FindingKind = "unknown-stop" | "detour" | "outside-hours" | "tracker-power" | "tracker-alarm";
+
+/** Why a fix reads possibly-unplugged (`PowerReason`), spelled here for the same reason. */
+export type PowerReasonKind = "battery" | "power-cut" | "on-battery" | "shutdown" | "low-supply";
 
 /** A stop's ignition state (`StopEngine["kind"]`), spelled here for the same reason. */
 export type StopEngineKind = "parked" | "running" | "unknown";
@@ -148,6 +151,8 @@ export const FINDING_KIND: Record<FindingKind, L> = {
   "unknown-stop": { th: "จอดที่ไม่รู้จัก", en: "Unknown stop" },
   detour: { th: "อ้อมทาง", en: "Detour" },
   "outside-hours": { th: "วิ่งนอกเวลางาน", en: "Outside working hours" },
+  "tracker-power": { th: "อาจถูกถอดปลั๊ก", en: "Possibly unplugged" },
+  "tracker-alarm": { th: "แจ้งเตือนจากเครื่อง", en: "Tracker alarm" },
 };
 
 // ── the finding sentences (§9 `text`) ───────────────────────────────────────
@@ -186,6 +191,101 @@ export const detourText = (from: L, to: L, km: number, referenceKm: number, rati
 export const outsideHoursText = (start: string, end: string, km: number): L => ({
   th: `วิ่งนอกเวลางาน ${start}–${end} ระยะ ${km} กม.`,
   en: `Driving outside working hours ${start}–${end}, ${km} km`,
+});
+
+/**
+ * One reason clause of the tracker-power sentence (§3 rule 11), e.g.
+ * `ใช้แบตสำรอง เหลือ 80%` · `on its backup battery, 80% left`. The battery and
+ * supply clauses carry the run's worst reading (`minBatteryPct`, `minVoltage` to 1 dp);
+ * without one they fall back to the bare clause rather than print `null`.
+ */
+export const powerReasonText = (
+  reason: PowerReasonKind,
+  minBatteryPct: number | null,
+  minVoltage: number | null,
+): L => {
+  switch (reason) {
+    case "battery":
+      return minBatteryPct === null
+        ? { th: "ใช้แบตสำรอง", en: "on its backup battery" }
+        : { th: `ใช้แบตสำรอง เหลือ ${minBatteryPct}%`, en: `on its backup battery, ${minBatteryPct}% left` };
+    case "power-cut":
+      return { th: "แจ้งเตือนไฟหลักถูกตัด", en: "main power cut alarm" };
+    case "on-battery":
+      return { th: "สถานะใช้แบตเตอรี่", en: "battery-power status" };
+    case "shutdown":
+      return { th: "สถานะปิดเครื่อง", en: "shutdown status" };
+    case "low-supply":
+      return minVoltage === null
+        ? { th: "ไฟเลี้ยงต่ำ", en: "supply collapsed" }
+        : { th: `ไฟเลี้ยงต่ำ ${minVoltage.toFixed(1)} V`, en: `supply collapsed to ${minVoltage.toFixed(1)} V` };
+  }
+};
+
+/**
+ * `เครื่องติดตามอาจถูกถอดปลั๊ก 14:02–14:20 (ใช้แบตสำรอง เหลือ 80%, …)` ·
+ * `Tracker possibly unplugged 14:02–14:20 (on its backup battery, 80% left, …)`.
+ * A single-fix run keeps the range (`14:02–14:02`), exactly like every other
+ * finding sentence here.
+ */
+export const trackerPowerText = (
+  start: string,
+  end: string,
+  reasons: readonly PowerReasonKind[],
+  minBatteryPct: number | null,
+  minVoltage: number | null,
+): L => {
+  const parts = reasons.map((r) => powerReasonText(r, minBatteryPct, minVoltage));
+  return {
+    th: `เครื่องติดตามอาจถูกถอดปลั๊ก ${start}–${end} (${parts.map((p) => p.th).join(", ")})`,
+    en: `Tracker possibly unplugged ${start}–${end} (${parts.map((p) => p.en).join(", ")})`,
+  };
+};
+
+/**
+ * The vendor's own `nAlarmState` bit names (its public web client's decoder, see
+ * docs/research/tracker-unplug-voltage.md). Bit 8 (main power cut) is NOT here:
+ * it is the tracker-power finding's `power-cut` reason.
+ */
+const ALARM_BIT_LABELS: ReadonlyMap<number, L> = new Map<number, L>([
+  [1, { th: "ชน", en: "Bump" }],
+  [2, { th: "ตัดวงจร", en: "Cut off circuit" }],
+  [4, { th: "ตัดน้ำมัน", en: "Fuel cut off" }],
+  [16, { th: "ออกนอกเขต", en: "Out of fence" }],
+  [32, { th: "เข้าเขต", en: "Into fence" }],
+  [64, { th: "ขับเร็วเกิน", en: "Over speed" }],
+  [128, { th: "ขอความช่วยเหลือ (SOS)", en: "SOS" }],
+  [16384, { th: "โจรกรรม", en: "Steal" }],
+  [134217728, { th: "โจรกรรม", en: "Steal" }],
+  [32768, { th: "แรงดันไฟต่ำ", en: "Low voltage" }],
+  [131072, { th: "สั่นสะเทือน", en: "Shock" }],
+]);
+
+/**
+ * Every set bit of an alarm `code`, lowest first, as a label; a bit the vendor's
+ * table does not know reads `รหัส 0x…` · `code 0x…` with that bit's hex value.
+ * Two bits that share a word (both "Steal" bits) print it once.
+ */
+export function alarmLabels(code: number): L[] {
+  const out: L[] = [];
+  const seen = new Set<string>();
+  const u = code >>> 0;
+  for (let b = 0; b < 32; b++) {
+    if (((u >>> b) & 1) === 0) continue;
+    const bit = 2 ** b;
+    const hex = bit.toString(16).toUpperCase();
+    const label = ALARM_BIT_LABELS.get(bit) ?? { th: `รหัส 0x${hex}`, en: `code 0x${hex}` };
+    if (seen.has(label.en)) continue;
+    seen.add(label.en);
+    out.push(label);
+  }
+  return out;
+}
+
+/** `เครื่องติดตามแจ้งเตือน: ชน, ตัดวงจร (14:02–14:20)` · `Tracker alarm: Bump, Cut off circuit (14:02–14:20)` */
+export const trackerAlarmText = (labels: readonly L[], start: string, end: string): L => ({
+  th: `เครื่องติดตามแจ้งเตือน: ${labels.map((l) => l.th).join(", ")} (${start}–${end})`,
+  en: `Tracker alarm: ${labels.map((l) => l.en).join(", ")} (${start}–${end})`,
 });
 
 /**

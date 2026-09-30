@@ -119,7 +119,7 @@ section > h2 { font-size: 14px; margin: 0 0 8px; color: var(--brand-700); text-t
 .tile .u { font-size: 12px; font-weight: 400; color: var(--ink-muted); }
 ul.findings { list-style: none; margin: 0; padding: 0; }
 ul.findings li { border-left: 4px solid var(--warn); background: var(--brand-50); border-radius: 0 8px 8px 0; padding: 8px 10px; margin-bottom: 8px; }
-ul.findings li.detour { border-left-color: var(--bad); }
+ul.findings li.detour, ul.findings li.tracker-power, ul.findings li.tracker-alarm { border-left-color: var(--bad); }
 ul.findings li .th { display: block; font-weight: 600; }
 ul.findings li .en { display: block; font-size: 12px; color: var(--ink-muted); }
 ul.findings li a { font-size: 12px; }
