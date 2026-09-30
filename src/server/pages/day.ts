@@ -806,6 +806,9 @@ export function mapScript(basemap: Basemap): string {
           var gapOn = ns.indexOf(Number(g)) >= 0;
           var gapStyle = mergeStyle(GAP_BASE, gapOn ? GAP_ON : GAP_DIM);
           for (var k = 0; k < gapLayers[g].length; k++) gapLayers[g][k].setStyle(gapStyle);
+          // A trip whose whole path is one gap has no solid line, so tripLayers never
+          // saw it: frame it from here (extending a normal trip twice is harmless).
+          if (gapOn) bounds.extend(coordBounds(tripCoords[g] || []));
         }
         setChipActive('trip-' + ns.join('-'));
         if (bounds.isValid()) map.fitBounds(bounds.pad(0.25));

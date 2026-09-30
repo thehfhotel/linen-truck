@@ -374,7 +374,7 @@ Branding: HF One staff burgundy like feedback's /staff (not the crimson guest pa
   "stops": [ { "arrive": "12:24", "depart": "13:34", "minutes": 70, "site": "hfville", "lat": 9.12223, "lon": 99.35179, "mapUrl": "…", "engineOnMin": 5,
                "engine": "parked", "engineOffAt": "12:27", "engineOnAt": "13:32", "engineOffMin": 65 } ],
   "legs":  [ { "trips": [3], "from": "hf", "to": "hfville", "km": 6.7, "referenceKm": 4.9, "ratio": 1.38 } ],
-  "gaps":  [ { "trip": 2, "from": "14:32", "to": "14:43", "fromAt": 1790235149, "toAt": 1790235805, "minutes": 10, "km": 3.9,
+  "gaps":  [ { "trip": 2, "from": "14:32", "to": "14:43", "fromAt": 1790235149, "toAt": 1790235805, "minutes": 10, "km": 4.0,
                "text": { "th": "ไม่มีสัญญาณ GPS 10 นาที (14:32–14:43)", "en": "No GPS data for 10 min (14:32–14:43)" } } ],
   "findings": [ { "kind": "unknown-stop", "text": { "th": "จอดที่ไม่รู้จัก 4 นาที (14:18–14:22) · ดับเครื่อง", "en": "Unknown stop 4 min (14:18–14:22), engine off" },
                   "mapUrl": "…", "minutes": 4, "start": "14:18", "end": "14:22", "engine": "parked", "engineOffMin": 3 },

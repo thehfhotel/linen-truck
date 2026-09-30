@@ -176,7 +176,23 @@ async function runMap(mode: "osm" | "google", report: unknown) {
     });
     return proxy;
   };
+  const fits: { pts: number[][] }[] = [];
+  const fakeBounds = (): any => {
+    const b: any = {
+      pts: [] as number[][],
+      extend(x: any) {
+        if (x && Array.isArray(x.pts)) b.pts.push(...x.pts);
+        else if (Array.isArray(x)) b.pts.push(x);
+        return b;
+      },
+      isValid: () => b.pts.length > 0,
+      pad: () => b,
+    };
+    return b;
+  };
   const L = generic({
+    latLngBounds: () => fakeBounds(),
+    map: () => generic({ fitBounds: (b: { pts: number[][] }) => fits.push({ pts: [...b.pts] }) }),
     polyline: (coords: number[][], style: Record<string, unknown>) => {
       const rec: FakeLine = { coords, base: style, setStyleCalls: [], style: { ...style }, popup: null };
       lines.push(rec);
@@ -235,7 +251,7 @@ async function runMap(mode: "osm" | "google", report: unknown) {
     win.location.hash = hash;
     handlers.hashchange!();
   };
-  return { lines, select };
+  return { lines, select, fits };
 }
 
 const DASH = "10 8";
@@ -334,3 +350,36 @@ for (const mode of ["osm", "google"] as const) {
     });
   });
 }
+
+describe("selecting a trip whose whole path is one gap", () => {
+  // 2026-09-06 trip 1 in miniature: the trip is exactly two fixes, 395 minutes
+  // apart, so both solid segments have fewer than two coordinates and the trip
+  // has no solid line at all — only the dashed one.
+  const ONLY_GAP_DAY: Point[] = [
+    ...parked(T0, HF, 6, 60, { voltage: 12.7 }),
+    ...parked(T0 + 300 + 395 * 60, HFVILLE, 6, 60, { voltage: 12.7 }),
+  ];
+  const report = reportFor(ONLY_GAP_DAY);
+
+  for (const mode of ["osm", "google"] as const) {
+    test(`zooms to both fixes (${mode})`, async () => {
+      expect(report.trips).toHaveLength(1);
+      expect(report.gaps).toHaveLength(1);
+      const g = report.gaps![0]!;
+      const point = (t: number): number[] => {
+        const p = report.path!.find((q) => q[2] === t)!;
+        return [p[0], p[1]];
+      };
+      const { lines, select, fits } = await runMap(mode, report);
+      expect(solid(lines)).toHaveLength(0);
+      expect(dashed(lines)).toHaveLength(1);
+
+      const before = fits.length;
+      select("#trip-1");
+      expect(fits.length).toBe(before + 1);
+      const framed = fits[fits.length - 1]!.pts.map((c) => c.join(","));
+      expect(framed).toContain(point(g.fromAt).join(","));
+      expect(framed).toContain(point(g.toAt).join(","));
+    });
+  }
+});
