@@ -32,7 +32,7 @@ export const pair = (l: L): string => `${l.th} · ${l.en}`;
 export type FindingKind = "unknown-stop" | "detour" | "outside-hours" | "tracker-power" | "tracker-alarm";
 
 /** Why a fix reads possibly-unplugged (`PowerReason`), spelled here for the same reason. */
-export type PowerReasonKind = "battery" | "power-cut" | "on-battery" | "shutdown" | "low-supply";
+export type PowerReasonKind = "battery" | "power-cut" | "on-battery" | "shutdown" | "low-supply" | "no-supply";
 
 /** A stop's ignition state (`StopEngine["kind"]`), spelled here for the same reason. */
 export type StopEngineKind = "parked" | "running" | "unknown";
@@ -219,6 +219,8 @@ export const powerReasonText = (
       return minVoltage === null
         ? { th: "ไฟเลี้ยงต่ำ", en: "supply collapsed" }
         : { th: `ไฟเลี้ยงต่ำ ${minVoltage.toFixed(1)} V`, en: `supply collapsed to ${minVoltage.toFixed(1)} V` };
+    case "no-supply":
+      return { th: "ไม่มีค่าไฟเลี้ยง", en: "no supply reading" };
   }
 };
 

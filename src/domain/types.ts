@@ -157,7 +157,7 @@ export interface Leg {
 }
 
 /** Why one fix reads "the tracker may have lost its supply" (§3 rule 11), in the fixed order the findings list them. */
-export type PowerReason = "battery" | "power-cut" | "on-battery" | "shutdown" | "low-supply";
+export type PowerReason = "battery" | "power-cut" | "on-battery" | "shutdown" | "low-supply" | "no-supply";
 
 /** Something the owner should look at. Rendered by the report layer (§9). */
 export type Finding =

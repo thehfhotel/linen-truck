@@ -107,7 +107,19 @@ describe("the report text", () => {
     });
   });
 
+  test("a run with no-supply reads the no-supply clause, last after low-supply", () => {
+    expect(trackerPowerText("14:02", "14:20", ["no-supply"], null, null)).toEqual({
+      th: "เครื่องติดตามอาจถูกถอดปลั๊ก 14:02–14:20 (ไม่มีค่าไฟเลี้ยง)",
+      en: "Tracker possibly unplugged 14:02–14:20 (no supply reading)",
+    });
+    expect(trackerPowerText("14:02", "14:20", ["low-supply", "no-supply"], null, 3.94)).toEqual({
+      th: "เครื่องติดตามอาจถูกถอดปลั๊ก 14:02–14:20 (ไฟเลี้ยงต่ำ 3.9 V, ไม่มีค่าไฟเลี้ยง)",
+      en: "Tracker possibly unplugged 14:02–14:20 (supply collapsed to 3.9 V, no supply reading)",
+    });
+  });
+
   test("each reason has its own Thai and English clause", () => {
+    expect(powerReasonText("no-supply", null, null)).toEqual({ th: "ไม่มีค่าไฟเลี้ยง", en: "no supply reading" });
     expect(powerReasonText("power-cut", null, null)).toEqual({ th: "แจ้งเตือนไฟหลักถูกตัด", en: "main power cut alarm" });
     expect(powerReasonText("on-battery", null, null)).toEqual({ th: "สถานะใช้แบตเตอรี่", en: "battery-power status" });
     expect(powerReasonText("shutdown", null, null)).toEqual({ th: "สถานะปิดเครื่อง", en: "shutdown status" });
