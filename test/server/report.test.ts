@@ -19,6 +19,9 @@ import {
 import { HF, HFVILLE, bkk, lerp, parked, pt } from "../domain/support.ts";
 import rawRows from "../fixtures/2026-09-05.raw.json";
 
+const RAW_POINTS_FOR_GAPS = (): Point[] =>
+  (rawRows as unknown as Record<string, string>[]).map(pointFromRow).filter((p): p is Point => p !== null);
+
 const TEID = "1000000001";
 const GENERATED_AT = 1788595367;
 
@@ -37,6 +40,7 @@ const emptySummary = (ymd: string): DaySummary => ({
   trips: [],
   legs: [],
   findings: [],
+  gaps: [],
 });
 
 const build = (summary: DaySummary, over: Partial<Parameters<typeof buildDayReport>[0]> = {}) =>
@@ -331,11 +335,78 @@ describe("summaryOnly", () => {
     expect(slim).not.toHaveProperty("trips");
     expect(slim).not.toHaveProperty("stops");
     expect(slim).not.toHaveProperty("legs");
+    expect(slim).not.toHaveProperty("gaps");
     expect(slim).not.toHaveProperty("path");
     expect(slim).toHaveProperty("findings");
     expect(slim).toHaveProperty("summary");
     expect(slim).toHaveProperty("device");
     expect(slim).toHaveProperty("dataQuality");
+  });
+});
+
+// ── GPS gaps (§9, "Additive since 2026-10-01") ────────────────────────────────
+
+describe("the gaps field", () => {
+  // 24 Sep trip 2 in miniature: 14:32:29 → 14:43:25 is 656 s, ~4 km of silence.
+  const T0 = bkk("2026-09-24", "14:30:00");
+  const FROM = bkk("2026-09-24", "14:32:29");
+  const TO = bkk("2026-09-24", "14:43:25");
+  const day = [
+    ...parked(T0 - 300, HF, 6, 60, { voltage: 12.7 }),
+    pt(T0 + 60, lerp(HF, HFVILLE, 0.05), { speed: 47, voltage: 13.8 }),
+    pt(FROM, lerp(HF, HFVILLE, 0.1), { speed: 47, voltage: 13.8 }),
+    ...parked(TO, HFVILLE, 6, 60, { voltage: 12.7 }),
+  ];
+  const summary = summarizeDay("2026-09-24", day, loadSites(), loadRules());
+  const report = build(summary, { points: day });
+
+  test("is always present: an empty array on a day with none", () => {
+    expect(build(emptySummary("2026-09-05")).gaps).toEqual([]);
+    const fixture = RAW_POINTS_FOR_GAPS();
+    expect(build(summarizeDay("2026-09-05", fixture, loadSites(), loadRules()), { points: fixture }).gaps).toEqual([]);
+  });
+
+  test("carries the trip, both instants, the floored minutes and the km to one place", () => {
+    expect(report.gaps).toHaveLength(1);
+    const g = report.gaps![0]!;
+    expect(g).toEqual({
+      trip: 1,
+      from: "14:32",
+      to: "14:43",
+      fromAt: FROM,
+      toAt: TO,
+      minutes: 10,
+      km: km1(summary.gaps[0]!.m / 1000),
+      text: {
+        th: "ไม่มีสัญญาณ GPS 10 นาที (14:32–14:43)",
+        en: "No GPS data for 10 min (14:32–14:43)",
+      },
+    });
+    expect(g.km).toBe(3.5);
+  });
+
+  test("fromAt and toAt are two consecutive fixes of the report's own path (what the map matches on)", () => {
+    const g = report.gaps![0]!;
+    const path = report.path!;
+    const i = path.findIndex((p) => p[2] === g.fromAt);
+    expect(i).toBeGreaterThan(0);
+    expect(path[i + 1]![2]).toBe(g.toAt);
+  });
+
+  test("a long silence reads in hours and minutes, and minutes floor", () => {
+    const long = { ...summary, gaps: [{ tripN: 2, from: FROM, to: FROM + 395 * 60 + 59, s: 395 * 60 + 59, m: 12345 }] };
+    const g = build(long).gaps![0]!;
+    expect(g.minutes).toBe(395);
+    expect(g.text.th).toContain("6 ชม. 35 น.");
+    expect(g.text.en).toContain("No GPS data for 395 min");
+    expect(g.km).toBe(12.3);
+  });
+
+  test("changes no other number of the report", () => {
+    const bare = build({ ...summary, gaps: [] }, { points: day });
+    const { gaps: _g, ...rest } = report;
+    const { gaps: _b, ...restBare } = bare;
+    expect(rest).toEqual(restBare);
   });
 });
 

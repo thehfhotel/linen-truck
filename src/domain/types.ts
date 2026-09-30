@@ -11,6 +11,8 @@
 //   * a `siteId` of `null` means "not at a known site", which is a finding-worthy
 //     fact (an unknown stop), not missing data.
 
+import type { Gap } from "./gaps.ts";
+
 /** One GPS fix. `t` = epoch seconds, `speed` = km/h, `voltage` = volts or null. */
 export interface Point {
   t: number;
@@ -61,6 +63,13 @@ export interface Rules {
    * relocation between two settled fixes is a real journey.
    */
   jitterRadiusM: number;
+  /**
+   * Seconds of silence between two consecutive fixes INSIDE a trip beyond which
+   * the map draws the stretch as a dashed "no GPS signal" line (§3 rule 10). Map
+   * only: km, trips, stops and findings never read it. Normal moving cadence is
+   * ~60 s.
+   */
+  gapS: number;
 }
 
 /**
@@ -163,4 +172,6 @@ export interface DaySummary {
   trips: Trip[];
   legs: Leg[];
   findings: Finding[];
+  /** GPS gaps inside trips (§3 rule 10) — map only, no other number depends on them. */
+  gaps: Gap[];
 }

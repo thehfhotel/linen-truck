@@ -63,14 +63,17 @@ describe("loadRules — a file written before a key existed", () => {
     const rules = loadRules(dir);
     expect(rules.engineHoldS).toBe(300);
     expect(rules.jitterRadiusM).toBe(600);
+    // `gapS` (GPS gaps, §3 rule 10) is newer still: an old file keeps the 5-minute default.
+    expect(rules.gapS).toBe(300);
     // The owner's own values are still theirs, not the defaults.
     expect(rules.stopRadiusM).toBe(120);
     expect(rules.engineOnVolts).toBe(13.2);
   });
 
   test("an owner value wins, and a nonsense one falls back rather than throwing", () => {
-    const dir = configDir({ "rules.json": '{ "engineHoldS": 120, "jitterRadiusM": "wide" }' });
+    const dir = configDir({ "rules.json": '{ "engineHoldS": 120, "jitterRadiusM": "wide", "gapS": 420 }' });
     const rules = loadRules(dir);
+    expect(rules.gapS).toBe(420);
     expect(rules.engineHoldS).toBe(120);
     expect(rules.jitterRadiusM).toBe(600);
   });

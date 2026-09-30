@@ -15,16 +15,19 @@
 //   * findings → a `{th, en}` sentence from src/shared/labels.ts.
 //
 // `summaryOnly()` is the week/range shape: the SAME object with `trips`, `stops`,
-// `legs` and `path` dropped and the findings kept (§9). Dropping rather than
+// `legs`, `gaps` and `path` dropped and the findings kept (§9). Dropping rather than
 // re-building is deliberate — a summary row can never disagree with the day it
 // summarises.
 
+import type { Gap } from "../domain/gaps.ts";
 import type { DaySummary, Finding, Leg, Point, Rules, Site, Stop, Trip } from "../domain/types.ts";
 import { mapUrl } from "../domain/geo.ts";
 import { cleanPoints } from "../domain/segment.ts";
 import type { StopSpan } from "../domain/span.ts";
+import { thaiDuration } from "../shared/time.ts";
 import {
   detourText,
+  gapText,
   outsideHoursText,
   unknownStopText,
   type FindingKind,
@@ -211,6 +214,28 @@ export type ReportFinding =
       endAt: number;
     };
 
+/**
+ * A GPS gap inside a trip (§3 rule 10), additive to §9: the tracker delivered
+ * nothing between the two fixes while the truck was between two places. The map
+ * draws the stretch as a dashed straight line and this is its popup text. Map
+ * only — no km, trip, stop or finding depends on it.
+ */
+export interface ReportGap {
+  /** `trips[].n` the gap sits in. */
+  trip: number;
+  /** Bangkok `HH:MM` of the last fix before the silence and the first after it. */
+  from: string;
+  to: string;
+  /** Epoch seconds of those two fixes — what the day-page map matches its path on. */
+  fromAt: number;
+  toAt: number;
+  /** Floored like every duration. */
+  minutes: number;
+  /** The straight line across the hole, 1 dp (a report-layer rounding, like every km). */
+  km: number;
+  text: L;
+}
+
 export interface ReportDataQuality {
   lastPollAt: number | null;
   lastPollOk: boolean | null;
@@ -232,6 +257,8 @@ export interface DayReport {
   stops?: ReportStop[];
   legs?: ReportLeg[];
   findings: ReportFinding[];
+  /** GPS gaps inside trips (§3 rule 10). Always present on a day report; omitted by `summaryOnly()`. */
+  gaps?: ReportGap[];
   path?: PathPoint[];
   dataQuality: ReportDataQuality;
 }
@@ -303,6 +330,24 @@ function toLeg(leg: Leg, rules: Rules): ReportLeg {
     km,
     referenceKm: reference === undefined ? null : reference,
     ratio: reference === undefined || reference === 0 ? null : ratio2(leg.km / reference),
+  };
+}
+
+function toGap(gap: Gap): ReportGap {
+  const minutes = minutesOf(gap.s);
+  const from = hhmm(gap.from);
+  const to = hhmm(gap.to);
+  return {
+    trip: gap.tripN,
+    from,
+    to,
+    fromAt: gap.from,
+    toAt: gap.to,
+    minutes,
+    km: km1(gap.m / 1000),
+    // Under an hour reads `10 นาที` like the finding sentences; a long silence
+    // (a tracker dead for hours) reads in hours and minutes, like the stops table.
+    text: gapText(minutes < 60 ? `${minutes} นาที` : thaiDuration(minutes), minutes, from, to),
   };
 }
 
@@ -476,17 +521,19 @@ export function buildDayReport(args: BuildArgs): DayReport {
     stops: summary.stops.map((stop, i) => toStop(stop, args.spans?.[i])),
     legs: summary.legs.map((leg) => toLeg(leg, rules)),
     findings: summary.findings.map((f) => toFinding(f, sites, summary.stops)),
+    gaps: summary.gaps.map(toGap),
     path: points.map((p): PathPoint => [coord5(p.lat), coord5(p.lon), p.t]),
     dataQuality: toDataQuality(args.poll, summary, args.pollerConfigured),
   };
 }
 
-/** The `/api/week` and `/feed/range` shape: no `trips`, `stops`, `legs`, `path` (§9). */
+/** The `/api/week` and `/feed/range` shape: no `trips`, `stops`, `legs`, `gaps`, `path` (§9). */
 export function summaryOnly(report: DayReport): DayReport {
-  const { trips, stops, legs, path, ...rest } = report;
+  const { trips, stops, legs, gaps, path, ...rest } = report;
   void trips;
   void stops;
   void legs;
+  void gaps;
   void path;
   return rest;
 }

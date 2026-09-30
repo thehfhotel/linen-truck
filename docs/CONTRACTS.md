@@ -61,9 +61,10 @@ Production values arrive through the deploy payload `.env` rendered by CI from r
 { "stopRadiusM": 120, "minStopS": 180, "mergeHopM": 300, "unknownStopMinS": 180,
   "movingKmh": 5, "schedule": { "start": "12:00", "end": "16:00" },
   "detourRatio": 1.25, "referenceKm": { "hf|hfville": 4.9 },
-  "engineOnVolts": 13.2, "engineHoldS": 300, "jitterRadiusM": 600 }
+  "engineOnVolts": 13.2, "engineHoldS": 300, "jitterRadiusM": 600, "gapS": 300 }
 ```
 `referenceKm` keys are the two site ids sorted and joined with `|`. Owner tunes these files; no UI.
+`gapS` (2026-10-01, GPS gaps, §3 rule 10) is the seconds of silence between two consecutive fixes inside a trip beyond which the map draws the stretch as a dashed line. It is MAP ONLY: no other rule reads it. A `rules.json` written before it existed keeps 300 (like `engineHoldS` and `jitterRadiusM`).
 
 ## 3. Domain (`src/domain/`, pure, no IO, no Date.now, unit-tested against `test/fixtures/2026-09-05.raw.json`)
 ```ts
@@ -72,7 +73,7 @@ export interface Point { t: number; lat: number; lon: number; speed: number; vol
 export interface Site { id: string; name: { th: string; en: string }; lat: number; lon: number; radiusM: number }
 export interface Rules { stopRadiusM: number; minStopS: number; mergeHopM: number; unknownStopMinS: number; movingKmh: number;
   schedule: { start: string; end: string }; detourRatio: number; referenceKm: Record<string, number>; engineOnVolts: number;
-  engineHoldS: number; jitterRadiusM: number }
+  engineHoldS: number; jitterRadiusM: number; gapS: number }
 export interface StopEngine { kind: 'parked' | 'running' | 'unknown'; offAt: number | null; onAt: number | null; offS: number }
 export interface Stop { arrive: number; depart: number; lat: number; lon: number; siteId: string | null;
   engineOnS: number; engine: StopEngine; virtual?: 'track-start' | 'track-end' }
@@ -86,7 +87,7 @@ export type Finding =
   | { kind: 'outside-hours'; start: number; end: number; km: number }
 export interface DaySummary { ymd: string; pointCount: number; firstPointAt: number | null; lastPointAt: number | null;
   km: number; tripCount: number; roundTrips: number; firstDeparture: number | null; lastArrival: number | null;
-  timeAtSiteS: Record<string, number>; stops: Stop[]; trips: Trip[]; legs: Leg[]; findings: Finding[] }
+  timeAtSiteS: Record<string, number>; stops: Stop[]; trips: Trip[]; legs: Leg[]; findings: Finding[]; gaps: Gap[] }
 ```
 ```ts
 // src/domain/geo.ts
@@ -103,6 +104,9 @@ export function segment(points: Point[], sites: Site[], rules: Rules): { stops: 
 export function audit(ymd: string, seg: ReturnType<typeof segment>, points: Point[], sites: Site[], rules: Rules): Finding[]
 // src/domain/summary.ts
 export function summarizeDay(ymd: string, points: Point[], sites: Site[], rules: Rules): DaySummary
+// src/domain/gaps.ts   (GPS gaps, 2026-10-01 — see rule 10)
+export interface Gap { tripN: number; from: number; to: number; s: number; m: number }   // from/to = the two fixes' epoch s; s = to - from; m = haversine metres between them
+export function tripGaps(trips: Trip[], rules: Rules): Gap[]   // trip order, then time order
 // src/domain/span.ts   (stop spans, 2026-09-30 — see rule 9)
 export const SPAN_WINDOW_DAYS = 7
 export interface StopSpan { arriveAt: number; arriveOpen: boolean; departAt: number | null; engineOffAt: number | null; engineOnAt: number | null;
@@ -205,6 +209,18 @@ Rules (proven in the Python prototype, 2026-09-05):
    `W.depart === windowPoints[last].t` (no departure in the data: still parked, or the data ends inside the stop), `engineOnAt = W.engine.onAt`,
    `lastFixAt = W.depart` (the last fix inside the stop, even when `departAt` is null). Either boundary with a W also takes `engineOnS = W.engineOnS`.
    Defaults (and virtual stops): `lastFixAt = s.depart`, `engineOnS = s.engineOnS`.
+10. GPS GAPS (`tripGaps`, owner decision 2026-09-30, MAP ONLY): on 2026-09-24 trip 2 the tracker delivered no fix from 14:32:29 to 14:43:25 while the truck
+   drove ~4 km, and the map joined the two fixes with a straight solid line that read as a GPS "jump". For each trip, each pair of CONSECUTIVE points in
+   `trip.path` with `to.t − from.t > rules.gapS` (300 s, STRICTLY more: exactly 300 s is not a gap, 301 s is) is a `Gap { tripN, from, to, s, m }` —
+   `from`/`to` the two fixes' epoch seconds, `s` the seconds between them, `m` the haversine metres of the straight line across the hole. In trip order,
+   then time order. Only INSIDE trips, so a parked truck reporting sparsely inside a stop never yields one (the hop between a stop's last fix and the trip's
+   first, or between the trip's last fix and the next stop's arrival fix, IS inside the trip). `DaySummary.gaps` carries them. It changes NO number of rules
+   1-9: `km` still includes the straight-line leg exactly as before, and no finding, trip, stop, leg or table reads it — the day page draws the gap as a
+   dashed "no GPS signal" line (§8) and the report lists it (§9), nothing else. Measured on 26 days of production data (38 trips, 441 in-trip fix pairs):
+   normal moving cadence is ~60 s; 12 pairs exceed 300 s and 2 exceed 600 s.
+   ON THE FIXTURE there is NO gap at `gapS` 300: the longest silence inside any of its four trips is 271 s (14:22:15 → 14:26:46, trip 4) and 270 s (12:11:44 →
+   12:16:14, trip 1), checked by hand against the raw `nTime` column. The 480-511 s hops of the parked runs (12:28 → 12:36, 13:07 → 13:15, 14:54 → 15:02 …) all sit
+   inside stops and never count. `gapS` 200 would flag exactly those two (trip 1, 270 s; trip 4, 271 s) and nothing from the stops.
 Expected on the fixture (rules above, sites above): 82 points after cleaning; 5 stops — a `track-start` book-end, then
 hfville 12:24–13:34, hf 13:48–14:06, hfville 14:18–14:22 and hfville 14:26–15:11; 4 trips totalling 15.35 km; legs:
 [hfville→hf (trip 2, 4.76 km), hf→hfville (trip 3, 6.74 km), hfville→hfville (trip 4, 0.37 km), all viaUnknownStops 0];
@@ -331,10 +347,18 @@ marker's popup is built from it (`<b>place</b><br>range (duration)` plus the bad
 never disagree; a missing entry falls back to the day-clipped popup.
 Basemap modes (rev 4, ADR 0002). `renderDayPage` takes `basemap: 'google' | 'osm'` (default `osm`) and `basemapPaused: boolean`; `/day/:ymd` passes `google` iff `googleTilesEnabled(config)`, and `basemapPaused` when today's `upstream ≥ TILE_DAILY_CAP` at render time. `pageHeaders(nonce, extra?, basemap = 'osm')` sets the CSP `img-src`.
 `map-data` gains `basemap` and, in Google mode, `attributionUrl: '/api/map/attribution'` and `logo` (the data URI).
-- **`osm` (Google off):** exactly the page as before, byte for byte — the OSM tile layer with its Referer opt-in, the CSP `img-src 'self' data: https://tile.openstreetmap.org`, no note, no footer.
+- **`osm` (Google off):** the page as before apart from the GPS-gap logic below, which is shared with `google` (so the OSM script is no longer byte-for-byte the pre-gap script; it is still `mapScript('osm')` = `MAP_SCRIPT`) — the OSM tile layer with its Referer opt-in, the CSP `img-src 'self' data: https://tile.openstreetmap.org`, no note, no footer.
 - **`google`:** there is **NO OpenStreetMap anywhere on the page** — Google's Terms 3.2.3(e) forbid its map "with or near a non-Google map", so not in the CSP (`img-src 'self' data:`), not in the markup, not in the script (`mapScript('google')` is built from a separate snippet so the OSM URL is absent by construction), and never as a fallback. The Google session turns business POIs on (`SESSION_REQUEST.styles = [{ featureType: "poi.business", stylers: [{ visibility: "on" }] }]`; the default roadmap hides most shops, restaurants and pharmacies), and the tile URL carries `?v=<style version>`, where `SESSION_STYLE_VERSION` (exported by `tiles.ts`) is the first 8 hex chars of the SHA-256 of `JSON.stringify(SESSION_REQUEST)`, so browsers holding day-old tiles (`private, max-age=86400`) of an older style refetch; `/tiles/:z/:x/:y` ignores the query. OSM mode is unchanged. The script (ES5, silent failures, `textContent`/`esc` rules as before) adds `L.tileLayer('/tiles/{z}/{x}/{y}?v=<style version>', { maxZoom: 19, tileSize: 256 })`; on `moveend`, debounced 400 ms, fetches the attribution for the current zoom and bounds and swaps it into `map.attributionControl` (removes the previous string, `addAttribution(esc(copyright))`); and adds a bottom-left `L.Control` holding the official Google Maps logo `<img alt="Google Maps">`, 18 px high, 10 px clear space at the sides and top, kept clear of the attribution (which is held to the width the logo leaves it). The logo is Google's own unmodified `GoogleMaps_Logo_WithLightOutline.svg` from `Google_Maps_Attribution_Assets.zip` (linked from the Map Tiles policies page, on developers.google.com), embedded as a data URI in `src/server/pages/googleLogo.ts`; never redrawn.
   A server-rendered `<p class="note" id="map-note">` (label `basemapPaused`: `แผนที่พื้นหลังหยุดชั่วคราว (เกินโควตาวันนี้หรือโหลดไม่ได้) — เส้นทางยังแสดงครบ` / `Basemap paused (today's quota reached or unavailable) — the route is still shown`) is `hidden` unless `basemapPaused`; the first `tileerror` unhides it. Over the cap or on an upstream error the route and stops stay drawn on a blank basemap.
   The layout footer (Terms 3.2.2(a)(i)) reads `แผนที่ · Map: Google Maps · ` followed by links to `https://maps.google.com/help/terms_maps/` (`ข้อกำหนด · Terms`) and `https://policies.google.com/privacy` (`ความเป็นส่วนตัว · Privacy`), each `rel="noreferrer noopener" target="_blank"`. The paused-note, logo and footer styles live in a second nonce'd `<style>` block (Google mode only), never a `style=` attribute.
+GPS gaps on the map (2026-10-01, §3 rule 10; both basemap modes — the logic lives in the shared part of `mapScript`, not in the basemap snippets). The script reads `gaps` from `/api/day` and,
+while slicing the path into per-trip segments, breaks a trip's polyline at each gap (matched on the pair of consecutive fixes `p[i-1][2] === gap.fromAt && p[i][2] === gap.toAt`): the solid trip line ends at the gap's first fix, a
+separate 2-point polyline spans the hole, and the solid line resumes at the second fix. The gap line is the trip colour `#8b0000`, long dashes (`dashArray: '10 8'`), weight 3 — visibly different from the thin dotted `REST_STYLE`
+"rest of day" line. It belongs to its trip's highlight group: selecting the trip bolds it (weight 5, opacity 1), selecting another trip dims it (weight 2, opacity .25), "all" restores it, and every one of those styles is built from a gap base style
+(`GAP_BASE`), never from `TRIP_BASE`, so the dash survives every restyle. Tapping it opens a popup `<b>` + `text.th` + `</b><br>` + `text.en` + `<br>` + `เส้นตรง ไม่ใช่เส้นทางจริง · straight line, not the route driven`
+(`LABELS.gapStraightLine`, passed through `map-data` `txt.gapStraight`), everything through the script's `esc`. When the report has at least one gap a server-rendered legend line sits under the map — `<p class="gaplegend">`, a short dashed swatch
++ `ไม่มีสัญญาณ GPS (ลากเส้นตรง) · No GPS data (straight line)` (`LABELS.gapLegend`) — styled by a class in the nonce'd style block, never a `style=` attribute; with no gap there is no legend. Like the rest of the script every failure is silent: a
+gap that cannot be drawn (a missing `gaps`, a malformed entry) never stops the trip, the stops or the report from drawing.
 Week page: one row per day (date link, km, trips, round trips, first departure, last arrival, findings by kind, points).
 Labels live in `src/shared/labels.ts` as `{ th, en }` pairs (`L`), rendered as "ไทย · English".
 Branding: HF One staff burgundy like feedback's /staff (not the crimson guest palette). Mobile-first, works on a phone.
@@ -350,6 +374,8 @@ Branding: HF One staff burgundy like feedback's /staff (not the crimson guest pa
   "stops": [ { "arrive": "12:24", "depart": "13:34", "minutes": 70, "site": "hfville", "lat": 9.12223, "lon": 99.35179, "mapUrl": "…", "engineOnMin": 5,
                "engine": "parked", "engineOffAt": "12:27", "engineOnAt": "13:32", "engineOffMin": 65 } ],
   "legs":  [ { "trips": [3], "from": "hf", "to": "hfville", "km": 6.7, "referenceKm": 4.9, "ratio": 1.38 } ],
+  "gaps":  [ { "trip": 2, "from": "14:32", "to": "14:43", "fromAt": 1790235149, "toAt": 1790235805, "minutes": 10, "km": 3.9,
+               "text": { "th": "ไม่มีสัญญาณ GPS 10 นาที (14:32–14:43)", "en": "No GPS data for 10 min (14:32–14:43)" } } ],
   "findings": [ { "kind": "unknown-stop", "text": { "th": "จอดที่ไม่รู้จัก 4 นาที (14:18–14:22) · ดับเครื่อง", "en": "Unknown stop 4 min (14:18–14:22), engine off" },
                   "mapUrl": "…", "minutes": 4, "start": "14:18", "end": "14:22", "engine": "parked", "engineOffMin": 3 },
                 { "kind": "detour", "text": { "th": "…", "en": "…" }, "trips": [3], "from": "hf", "to": "hfville", "km": 6.7, "referenceKm": 4.9, "ratio": 1.38 },
@@ -358,7 +384,7 @@ Branding: HF One staff burgundy like feedback's /staff (not the crimson guest pa
   "dataQuality": { "lastPollAt": 1788599000, "lastPollOk": true, "note": null } }
 ```
 The three finding entries above are a SHAPE catalogue: the 2026-09-05 fixture itself raises only the detour (see §3).
-`/api/week` and `/feed/range` return the same objects without `trips`, `stops`, `legs`, `path` (findings kept).
+`/api/week` and `/feed/range` return the same objects without `trips`, `stops`, `legs`, `gaps`, `path` (findings kept).
 Additive since 2026-09-05 (map filtering): trips also carry `startAt`/`endAt` (epoch s), stops `arriveAt`/`departAt`,
 unknown-stop findings `stopIndex` (index into `stops`), outside-hours findings `startAt`/`endAt`.
 Additive since 2026-09-06 (engine events, §3 rule 1): every stop carries `engine` (`"parked" | "running" | "unknown"`),
@@ -376,6 +402,10 @@ differ from the stop's own `arriveAt`/`departAt`/engine times; every other stop,
 false`). `arrive`, `depart`, `arriveAt`, `departAt`, `minutes`, the engine fields and the findings are exactly as before — `minutes` and the summary
 count only the day. `/api/day` and `/feed/daily` (and the page) fill the spans from a window of ±7 days; `/api/week` and `/feed/range` strip the stops, so
 they never load it, and a report built without spans reports each stop as its own span.
+Additive since 2026-10-01 (GPS gaps, §3 rule 10): `gaps: [{ trip, from, to, fromAt, toAt, minutes, km, text: { th, en } }]`, ALWAYS present on `/api/day` and `/feed/daily` (an empty array when none), one entry per `DaySummary.gaps`
+in the same order — `trip` the trip's `n`, `from`/`to` Bangkok `HH:MM` of the last fix before and the first fix after the silence, `fromAt`/`toAt` those two fixes' epoch seconds (what the day-page map matches on: they are consecutive
+entries of `path`), `minutes` floored like every duration, `km` the straight line across the hole to 1 dp (report-layer rounding only), and `text.th` `ไม่มีสัญญาณ GPS 10 นาที (14:32–14:43)` (under an hour `N นาที`, from an hour up `thaiDuration`, so 395 min reads `6 ชม. 35 น.`)
+with `text.en` `No GPS data for 10 min (14:32–14:43)` (always plain minutes). It is not a finding: `findings`, `findingCount`, `summary`, `trips`, `stops` and `legs` are exactly as before. `/api/week` and `/feed/range` strip `gaps` as they strip `path`.
 Rounding happens only in the report layer: km to 1 dp, ratio to 2 dp of the unrounded quotient, minutes floored.
 
 ## 10. Scripts (rev 2)

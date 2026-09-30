@@ -7,6 +7,7 @@
 
 import { audit } from "./audit.ts";
 import { bangkokDayWindow } from "./clock.ts";
+import { tripGaps } from "./gaps.ts";
 import { cleanPoints, segment } from "./segment.ts";
 import type { DaySummary, Leg, Point, Rules, Site, Stop, Trip } from "./types.ts";
 
@@ -77,5 +78,6 @@ export function summarizeDay(ymd: string, points: Point[], sites: Site[], rules:
     trips: seg.trips,
     legs: seg.legs,
     findings,
+    gaps: tripGaps(seg.trips, rules),
   };
 }
