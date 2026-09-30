@@ -1,7 +1,7 @@
 // config.ts invariants (docs/CONTRACTS.md §1).
 
 import { describe, expect, test } from "bun:test";
-import { loadConfig, sinotrackConfigured, type Env } from "../../src/server/config.ts";
+import { googleTilesEnabled, loadConfig, sinotrackConfigured, type Env } from "../../src/server/config.ts";
 
 /** Every test starts from a safe base: DATA_DIR must never be "/data" outside production. */
 const env = (extra: Env = {}): Env => ({ DATA_DIR: "./data", ...extra });
@@ -93,5 +93,40 @@ describe("loadConfig", () => {
     expect(loadConfig(env({ ALLOW_DEV_AUTH: "1" })).allowDevAuth).toBe(true);
     expect(loadConfig(env({ ALLOW_DEV_AUTH: "true" })).allowDevAuth).toBe(false);
     expect(loadConfig(env()).allowDevAuth).toBe(false);
+  });
+});
+
+describe("the Google basemap variables (rev 4)", () => {
+  test("GOOGLE_MAPS_KEY defaults to empty (Google off), TILE_DAILY_CAP to 2500", () => {
+    const config = loadConfig(env());
+    expect(config.googleMapsKey).toBe("");
+    expect(config.tileDailyCap).toBe(2500);
+    expect(googleTilesEnabled(config)).toBe(false);
+  });
+
+  test("a key turns Google on; whitespace-only counts as empty", () => {
+    expect(googleTilesEnabled(loadConfig(env({ GOOGLE_MAPS_KEY: " abc " })))).toBe(true);
+    expect(loadConfig(env({ GOOGLE_MAPS_KEY: " abc " })).googleMapsKey).toBe("abc");
+    expect(googleTilesEnabled(loadConfig(env({ GOOGLE_MAPS_KEY: "   " })))).toBe(false);
+    expect(googleTilesEnabled(loadConfig(env({ GOOGLE_MAPS_KEY: "" })))).toBe(false);
+  });
+
+  test("TILE_DAILY_CAP: a non-negative integer (0 is legal), empty is the default, anything else throws", () => {
+    expect(loadConfig(env({ TILE_DAILY_CAP: "100" })).tileDailyCap).toBe(100);
+    expect(loadConfig(env({ TILE_DAILY_CAP: " 7 " })).tileDailyCap).toBe(7);
+    expect(loadConfig(env({ TILE_DAILY_CAP: "0" })).tileDailyCap).toBe(0);
+    expect(loadConfig(env({ TILE_DAILY_CAP: "" })).tileDailyCap).toBe(2500);
+    for (const bad of ["-1", "1.5", "abc", "1e3", "12x", "+5"]) {
+      expect(() => loadConfig(env({ TILE_DAILY_CAP: bad }))).toThrow(/TILE_DAILY_CAP/);
+    }
+  });
+
+  test("the boot error never echoes the key", () => {
+    try {
+      loadConfig(env({ GOOGLE_MAPS_KEY: "secret-key-value", TILE_DAILY_CAP: "nope" }));
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(String(err)).not.toContain("secret-key-value");
+    }
   });
 });

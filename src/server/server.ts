@@ -19,10 +19,11 @@ import { mkdirSync } from "node:fs";
 import { createApp, resolveDeps } from "./app.ts";
 import { devAuthEnabled } from "./auth.ts";
 import { startBackupScheduler } from "./backupScheduler.ts";
-import { loadConfig, sinotrackConfigured } from "./config.ts";
+import { googleTilesEnabled, loadConfig, sinotrackConfigured } from "./config.ts";
 import { openDatabase } from "./db.ts";
 import { startPoller } from "./poller.ts";
 import { loadRules, loadSites } from "./siteConfig.ts";
+import { createTileService } from "./tiles.ts";
 
 const config = loadConfig(process.env);
 
@@ -38,12 +39,23 @@ if (devAuthEnabled(config)) {
 const poller = startPoller(db, { config, nowMs: () => Date.now() });
 const backups = startBackupScheduler({ config, nowMs: () => Date.now() });
 
+// The Google tile proxy: real fetch, real clock. Inert (every call answers
+// `disabled`, nothing touches the network or the disk) while GOOGLE_MAPS_KEY is empty.
+const tiles = createTileService({
+  db,
+  config,
+  dataDir: config.dataDir,
+  now: () => new Date(),
+  log: (line) => console.log(line),
+});
+
 const app = createApp(db, {
   ...resolveDeps({
     config,
     sites: loadSites(),
     rules: loadRules(),
     pollerStatus: () => poller.status(),
+    tiles,
   }),
 });
 
@@ -56,7 +68,7 @@ const server = Bun.serve({
 console.log(
   `linen-truck listening on http://localhost:${server.port} (${config.nodeEnv}) — poller ${
     sinotrackConfigured(config) ? "armed" : "dormant"
-  }`,
+  }, google basemap ${googleTilesEnabled(config) ? "on" : "off"}`,
 );
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

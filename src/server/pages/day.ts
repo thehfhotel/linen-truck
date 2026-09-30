@@ -15,8 +15,10 @@ import type { Site } from "../../domain/types.ts";
 import { LABELS, pair, tripLabel, type L } from "../../shared/labels.ts";
 import { thaiDateTime, thaiDuration, thaiLongDate, thaiShortDate } from "../../shared/time.ts";
 import { bangkokStamp, hhmm, type DayReport, type ReportStop, type ReportTrip } from "../report.ts";
+import { GOOGLE_LOGO_DATA_URI } from "./googleLogo.ts";
 import {
   escapeHtml,
+  type Basemap,
   LEAFLET_CSS_SRI,
   LEAFLET_CSS_URL,
   LEAFLET_JS_SRI,
@@ -263,7 +265,31 @@ export interface DayPageArgs {
   /** `null` hides the link — the day page never offers the future. */
   nextYmd: string | null;
   todayYmd: string;
+  /** Which basemap the map draws (§8). Absent = `osm`, today's page byte for byte. */
+  basemap?: Basemap;
+  /** Google mode only: today's upstream tile budget is spent, so the note shows from the first byte. */
+  basemapPaused?: boolean;
 }
+
+/**
+ * Google mode only (§8): the paused-basemap note, the logo control and the terms
+ * line. A second nonce'd style block after Leaflet's own stylesheet, so the OSM
+ * page's CSS is not touched at all. No `style=` attribute anywhere (no
+ * 'unsafe-inline' in the CSP).
+ *
+ * The logo's clear space is Google's: 10 px left (Leaflet's own control margin),
+ * 10 px right and top (padding here), and 10 px below (Leaflet's margin, more than
+ * the 5 px asked for). The attribution is held to the width the logo leaves it, so
+ * on a phone the two wrap rather than overlap.
+ */
+const GOOGLE_STYLE = `
+[hidden] { display: none !important; }
+.note { margin: 0 0 8px; padding: 8px 10px; border-left: 4px solid var(--warn); background: var(--tint); border-radius: 0 8px 8px 0; font-size: 13px; }
+.gmaps-logo { padding: 10px 10px 0 0; }
+.gmaps-logo img { display: block; height: 18px; width: auto; }
+.leaflet-control-attribution { max-width: calc(100% - 120px); }
+.mapfoot { margin: 16px 0 0; font-size: 12px; color: var(--ink-muted); }
+`;
 
 export function renderDayPage(args: DayPageArgs): string {
   const { report, sites, nonce } = args;
@@ -281,6 +307,12 @@ export function renderDayPage(args: DayPageArgs): string {
   const siteTiles = sites
     .map((site) => tile(site.name, String(s.timeAtSiteMin[site.id] ?? 0), LABELS.unitMin))
     .join("");
+
+  const basemap: Basemap = args.basemap ?? "osm";
+  const google = basemap === "google";
+  const mapNote = google
+    ? `\n<p class="note" id="map-note"${args.basemapPaused ? "" : " hidden"}>${escapeHtml(pair(LABELS.basemapPaused))}</p>`
+    : "";
 
   const tripRows = report.trips ?? [];
   const stopRows = report.stops ?? [];
@@ -333,12 +365,14 @@ ${
 <section>
 ${dated(LABELS.mapHeading)}
 ${chipsHtml(report, sites)}
-<p class="viewing" id="map-view">${pairHtml(LABELS.viewing)}: <span id="map-view-text">${escapeHtml(views.all!)}</span></p>
+<p class="viewing" id="map-view">${pairHtml(LABELS.viewing)}: <span id="map-view-text">${escapeHtml(views.all!)}</span></p>${mapNote}
 <div id="map" data-ymd="${escapeHtml(report.date)}"></div>
 </section>`;
 
   const head = `
-<link rel="stylesheet" href="${LEAFLET_CSS_URL}" integrity="${LEAFLET_CSS_SRI}" crossorigin="anonymous" referrerpolicy="no-referrer">`;
+<link rel="stylesheet" href="${LEAFLET_CSS_URL}" integrity="${LEAFLET_CSS_SRI}" crossorigin="anonymous" referrerpolicy="no-referrer">${
+    google ? `\n<style nonce="${nonce}">${GOOGLE_STYLE}</style>` : ""
+  }`;
 
   const mapData = {
     sites: sites.map((site) => ({ id: site.id, name: site.name.th, lat: site.lat, lon: site.lon, radiusM: site.radiusM })),
@@ -351,12 +385,22 @@ ${chipsHtml(report, sites)}
     },
     views,
     stopText: stopTexts(report, sites),
+    basemap,
+    ...(google ? { attributionUrl: "/api/map/attribution", logo: GOOGLE_LOGO_DATA_URI } : {}),
   };
 
   const bodyEnd = `
 <script type="application/json" id="map-data" nonce="${nonce}">${jsonBlock(mapData)}</script>
 <script src="${LEAFLET_JS_URL}" integrity="${LEAFLET_JS_SRI}" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-<script nonce="${nonce}">${MAP_SCRIPT}</script>`;
+<script nonce="${nonce}">${google ? mapScript("google") : MAP_SCRIPT}</script>`;
+
+  // Google Maps Platform Terms 3.2.2(a)(i): the app tells its users it carries
+  // Google Maps and points at Google's terms and privacy policy.
+  const link = (href: string, label: L): string =>
+    `<a href="${href}" rel="noreferrer noopener" target="_blank">${escapeHtml(pair(label))}</a>`;
+  const footer = google
+    ? `\n<footer class="mapfoot">${escapeHtml(pair(LABELS.mapCredit))} · ${link("https://maps.google.com/help/terms_maps/", LABELS.mapTerms)} · ${link("https://policies.google.com/privacy", LABELS.mapPrivacy)}</footer>`
+    : "";
 
   return renderPage({
     title: `${LABELS.appName.th} ${report.date}`,
@@ -365,6 +409,7 @@ ${chipsHtml(report, sites)}
     headingAside: escapeHtml(report.date),
     head,
     body,
+    ...(footer ? { footer } : {}),
     bodyEnd,
   });
 }
@@ -407,7 +452,96 @@ export const MAP_ESC_FN = `function esc(v) {
  * `history.replaceState` (never `pushState` — a filter click is not a new page),
  * and a hash present on load is applied once the fetch resolves.
  */
-export const MAP_SCRIPT = `
+const OSM_BASEMAP_SNIPPET = `// OSM's tile usage policy requires a Referer: a tile requested without one
+    // comes back as a 403 "Access blocked" image. The page's own policy is
+    // same-origin (no Referer leaves the site), so the tiles alone opt into
+    // sending the bare origin — never the /day/<date> path. The a/b/c
+    // subdomains are deprecated by OSM; the bare host is the supported one.
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      referrerPolicy: 'strict-origin-when-cross-origin',
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);`;
+
+const GOOGLE_BASEMAP_SNIPPET = `// GOOGLE MODE (docs/CONTRACTS.md §8, ADR 0002). Tiles come from OUR /tiles route,
+    // which holds the key, the session, the cache and the daily budget. There is NO
+    // other basemap layer here and never a fallback to one: Google's Terms (3.2.3(e))
+    // forbid its map "with or near" a non-Google map. Over budget or on an upstream
+    // error the route and stops stay drawn on a blank basemap and #map-note shows.
+    var noteShown = false;
+    function showNote() {
+      if (noteShown) return;
+      noteShown = true;
+      try {
+        var note = document.getElementById('map-note');
+        if (note) note.removeAttribute('hidden');
+      } catch (e) { /* ignore */ }
+    }
+    var googleBase = L.tileLayer('/tiles/{z}/{x}/{y}', { maxZoom: 19, tileSize: 256 });
+    googleBase.on('tileerror', showNote);
+    googleBase.addTo(map);
+
+    // The Google Maps logo, bottom-left, clear of Leaflet's own attribution (bottom-right).
+    try {
+      if (cfg.logo && L.Control && L.Control.extend) {
+        var GoogleLogo = L.Control.extend({
+          options: { position: 'bottomleft' },
+          onAdd: function () {
+            var box = L.DomUtil.create('div', 'gmaps-logo');
+            var img = document.createElement('img');
+            img.alt = 'Google Maps';
+            img.src = cfg.logo;
+            box.appendChild(img);
+            return box;
+          }
+        });
+        new GoogleLogo().addTo(map);
+      }
+    } catch (e) { /* ignore */ }
+
+    // The data attribution varies with the viewport: ask for it after the map settles
+    // (debounced), and swap it into Leaflet's attribution control as escaped text.
+    var attrTimer = null;
+    var attrShown = '';
+    function clampNum(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+    function refreshAttribution() {
+      try {
+        var b = map.getBounds();
+        var q = 'zoom=' + clampNum(Math.round(map.getZoom()), 0, 22) +
+          '&north=' + clampNum(b.getNorth(), -90, 90) +
+          '&south=' + clampNum(b.getSouth(), -90, 90) +
+          '&east=' + clampNum(b.getEast(), -180, 180) +
+          '&west=' + clampNum(b.getWest(), -180, 180);
+        fetch(cfg.attributionUrl + '?' + q, {
+          headers: { accept: 'application/json' },
+          credentials: 'same-origin'
+        }).then(function (r) {
+          return r.ok ? r.json() : null;
+        }).then(function (d) {
+          if (!d || typeof d.copyright !== 'string' || d.copyright === '' || d.copyright === attrShown) return;
+          if (attrShown) map.attributionControl.removeAttribution(esc(attrShown));
+          attrShown = d.copyright;
+          map.attributionControl.addAttribution(esc(attrShown));
+        }).catch(function () { /* silent */ });
+      } catch (e) { /* silent */ }
+    }
+    if (cfg.attributionUrl) {
+      map.on('moveend', function () {
+        if (attrTimer) clearTimeout(attrTimer);
+        attrTimer = setTimeout(refreshAttribution, 400);
+      });
+    }`;
+
+/**
+ * The map script for one basemap mode. The two variants differ ONLY in the
+ * basemap snippet, and they are built from separate constants (rather than one
+ * script that branches at runtime) so the Google page's script does not contain
+ * the OpenStreetMap tile URL at all: "no OSM anywhere on the page" is then true by
+ * construction and a test can assert it over the whole page.
+ */
+export function mapScript(basemap: Basemap): string {
+  const basemapSnippet = basemap === "google" ? GOOGLE_BASEMAP_SNIPPET : OSM_BASEMAP_SNIPPET;
+  return `
 (function () {
   try {
     var el = document.getElementById('map');
@@ -433,16 +567,7 @@ export const MAP_SCRIPT = `
     }
 
     var map = L.map(el, { scrollWheelZoom: false });
-    // OSM's tile usage policy requires a Referer: a tile requested without one
-    // comes back as a 403 "Access blocked" image. The page's own policy is
-    // same-origin (no Referer leaves the site), so the tiles alone opt into
-    // sending the bare origin — never the /day/<date> path. The a/b/c
-    // subdomains are deprecated by OSM; the bare host is the supported one.
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      referrerPolicy: 'strict-origin-when-cross-origin',
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-    }).addTo(map);
+    ${basemapSnippet}
 
     ${MAP_ESC_FN}
 
@@ -699,3 +824,7 @@ export const MAP_SCRIPT = `
   } catch (e) { console.error('map:', e); }
 })();
 `;
+}
+
+/** The OSM variant: today's script, byte for byte. */
+export const MAP_SCRIPT = mapScript("osm");

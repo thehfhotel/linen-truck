@@ -108,6 +108,10 @@ you@example.com` — same rule as guest-feedback.
 - `src/server/sinotrack.ts` — the platform client (login, track, mileage,
   OBD), signed requests, 20 s timeout.
 - `src/server/db.ts` — schema, `PRAGMA user_version` migrations, every query.
+- `src/server/tiles.ts` — the optional Google basemap proxy (rev 4, ADR 0002): key
+  and session server-side, disk cache only as Cache-Control allows, per-day hard
+  cap. `GOOGLE_MAPS_KEY` empty = off = the OSM page, unchanged. Never log a URL,
+  a body or an exception message from it: the key rides in the upstream URL.
 - `src/server/poller.ts` — the background fetch loop; never overlaps, never
   throws, exposes a status object for `/healthz`.
 - `src/server/app.ts` — `createApp(db, deps)`, both the gated HTML/API tree

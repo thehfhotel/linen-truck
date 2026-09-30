@@ -11,6 +11,9 @@
 //     compose file, and it is exactly the combination that would let
 //     ALLOW_DEV_AUTH through on the real volume.
 //   * PUBLIC_URL that is not a URL.
+//   * TILE_DAILY_CAP that is not a non-negative integer. It is the app's own
+//     hard stop on billable Google tile requests; a typo that silently fell back
+//     to the default would hide the very budget the owner tried to set.
 //   * SINOTRACK_SERVER that is not an https URL. The device password is posted
 //     to that host in a form body on every poll, so a stray `http://` — a typo,
 //     a copy-paste from the vendor's own docs — would put the credential on the
@@ -61,6 +64,14 @@ export interface Config {
   /** Bangkok `HH:MM` for the nightly backup, or `""` for no backups at all (§1). */
   backupTime: string;
   allowDevAuth: boolean;
+  /**
+   * Google Map Tiles API key (§1). EMPTY = Google is off and the day page uses
+   * OpenStreetMap exactly as before. NEVER logged, never rendered, never sent to
+   * a browser: it only ever appears inside the upstream request URL (tiles.ts).
+   */
+  googleMapsKey: string;
+  /** Hard stop on upstream tile requests per Bangkok day (§1); 0 is legal and means none. */
+  tileDailyCap: number;
 }
 
 export type Env = Record<string, string | undefined>;
@@ -83,6 +94,14 @@ const positiveInt = (env: Env, key: string, fallback: number): number => {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 };
 
+/** A non-negative integer (`0` allowed), or the fallback when unset/empty; anything else throws. */
+const nonNegativeInt = (env: Env, key: string, fallback: number): number => {
+  const raw = text(env, key);
+  if (raw === "") return fallback;
+  if (!/^[0-9]{1,9}$/.test(raw)) throw new Error(`config: ${key} must be a non-negative integer: ${raw}`);
+  return Number(raw);
+};
+
 /**
  * cloudflared runs ON the box and reaches the container over loopback, so the
  * only peers that may set `CF-Connecting-IP` are localhost and the Docker bridge
@@ -94,6 +113,8 @@ export const DEFAULT_PUBLIC_URL = "https://truck.thehfhotel.org";
 export const DEFAULT_BACKUP_TIME = "02:35";
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 export const DEFAULT_SINOTRACK_SERVER = "https://242.sinotrack.com";
+/** §1 TILE_DAILY_CAP — under the owner-side Google quota override (3 000/day), so this stops first. */
+export const DEFAULT_TILE_DAILY_CAP = 2500;
 
 /**
  * Reads the whole environment into one frozen object. Throws only for the
@@ -175,6 +196,8 @@ export function loadConfig(env: Env = process.env): Config {
     trustedProxyCidrs: list(text(env, "TRUSTED_PROXY_CIDRS", DEFAULT_TRUSTED_PROXY_CIDRS)),
     backupTime,
     allowDevAuth: text(env, "ALLOW_DEV_AUTH") === "1",
+    googleMapsKey: text(env, "GOOGLE_MAPS_KEY"),
+    tileDailyCap: nonNegativeInt(env, "TILE_DAILY_CAP", DEFAULT_TILE_DAILY_CAP),
   };
 
   return Object.freeze(config);
@@ -184,3 +207,6 @@ export function loadConfig(env: Env = process.env): Config {
 export const sinotrackConfigured = (config: Config): boolean =>
   config.sinotrackUser !== "" && config.sinotrackPassword !== "" && config.sinotrackTeid !== "";
 
+
+/** True when a Google Maps key is configured; the day page then uses Google's basemap (§8). */
+export const googleTilesEnabled = (config: Config): boolean => config.googleMapsKey !== "";

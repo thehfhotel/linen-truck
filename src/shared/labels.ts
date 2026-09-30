@@ -113,6 +113,15 @@ export const LABELS = {
   viewing: { th: "กำลังดู", en: "Viewing" },
   showTripOnMap: { th: "ดูเที่ยวนี้บนแผนที่", en: "Show this trip on the map" },
   showStopOnMap: { th: "ดูจุดนี้บนแผนที่", en: "Show this stop on the map" },
+  /** Google basemap only (rev 4): over the daily tile budget, or the tiles would not load. */
+  basemapPaused: {
+    th: "แผนที่พื้นหลังหยุดชั่วคราว (เกินโควตาวันนี้หรือโหลดไม่ได้) — เส้นทางยังแสดงครบ",
+    en: "Basemap paused (today's quota reached or unavailable) — the route is still shown",
+  },
+  /** Footer credit + links, Google basemap only (Google Maps Platform Terms 3.2.2(a)(i)). */
+  mapCredit: { th: "แผนที่", en: "Map: Google Maps" },
+  mapTerms: { th: "ข้อกำหนด", en: "Terms" },
+  mapPrivacy: { th: "ความเป็นส่วนตัว", en: "Privacy" },
 
   // ── week table ────────────────────────────────────────────────────────────
   colDate: { th: "วันที่", en: "Date" },

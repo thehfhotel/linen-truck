@@ -48,11 +48,19 @@ export function newNonce(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** Which basemap a page draws (§8). Google mode carries NO OpenStreetMap anywhere, the CSP included. */
+export type Basemap = "google" | "osm";
+
 /**
  * `no-store` on every page: a day report changes every ten minutes and a stale
  * one that says "nothing unusual" is worse than a slow one.
+ *
+ * `basemap` only moves the `img-src`: `osm` (the default) allows the OSM tile
+ * host exactly as before; `google` allows only `'self' data:` because Google's
+ * tiles arrive through our own `/tiles` route and its Terms (3.2.3(e)) forbid a
+ * non-Google map "with or near" them, so no OSM host may even be permitted.
  */
-export function pageHeaders(nonce: string, extra?: Record<string, string>): Headers {
+export function pageHeaders(nonce: string, extra?: Record<string, string>, basemap: Basemap = "osm"): Headers {
   const headers = new Headers({
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store",
@@ -64,7 +72,7 @@ export function pageHeaders(nonce: string, extra?: Record<string, string>): Head
       `script-src 'nonce-${nonce}' https://cdnjs.cloudflare.com`,
       `style-src 'nonce-${nonce}' https://cdnjs.cloudflare.com https://fonts.googleapis.com`,
       "font-src https://fonts.gstatic.com",
-      "img-src 'self' data: https://tile.openstreetmap.org",
+      basemap === "google" ? "img-src 'self' data:" : "img-src 'self' data: https://tile.openstreetmap.org",
       "connect-src 'self'",
       "base-uri 'none'",
       "form-action 'none'",
@@ -153,6 +161,8 @@ export interface LayoutArgs {
   head?: string;
   /** The page body (already-escaped HTML). */
   body: string;
+  /** Markup after the body, inside the wrapper (already-safe). The day page's Google terms line. */
+  footer?: string;
   /** Markup placed just before </body> (already-safe: the nonce'd map script). */
   bodyEnd?: string;
 }
@@ -173,7 +183,7 @@ export function renderPage(a: LayoutArgs): string {
 <body>
 <header class="bar"><div class="inner"><h1>${escapeHtml(a.heading)}</h1><div class="date">${a.headingAside ?? ""}</div></div></header>
 <div class="wrap">
-${a.body}
+${a.body}${a.footer ?? ""}
 </div>${a.bodyEnd ?? ""}
 </body>
 </html>
