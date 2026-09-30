@@ -1,4 +1,4 @@
-# linen-truck — CONTRACTS (rev 3, 2026-09-05 — HF Ville box, public repo)
+# linen-truck — CONTRACTS (rev 4, 2026-09-30 — HF Ville box, public repo, optional Google basemap)
 
 The locked interface spec for the linen-truck audit service. Every implementer reads this first.
 Style, stack and conventions mirror `~/HF/guest-feedback` (Bun 1.3 + Elysia + bun:sqlite, one container on
@@ -28,7 +28,7 @@ evergreen, estate-ci deploy). When this file and guest-feedback disagree, this f
 | NODE_ENV | | `production` in the container; boot throws if not production while DATA_DIR === `/data` (same guard as feedback) |
 | PORT | 4100 | |
 | TZ | Asia/Bangkok | |
-| DATA_DIR | /data | `truck.db`, `backups/` |
+| DATA_DIR | /data | `truck.db`, `backups/`, `tiles/` (Google tile cache, rev 4) |
 | PUBLIC_URL | https://truck.thehfhotel.org | origin for CSRF/links |
 | GIT_SHA | unknown | echoed by /healthz |
 | SINOTRACK_SERVER | https://242.sinotrack.com | cluster server that hosts the account |
@@ -43,8 +43,10 @@ evergreen, estate-ci deploy). When this file and guest-feedback disagree, this f
 | TRUSTED_PROXY_CIDRS | 127.0.0.1/32,172.16.0.0/12 | cloudflared runs on the box itself; same semantics as feedback |
 | BACKUP_TIME | 02:35 | Bangkok wall-clock for the in-process nightly `VACUUM INTO DATA_DIR/backups/truck-<stamp>.db` (keep 14). Empty → off. No host timer on this box. |
 | ALLOW_DEV_AUTH | | dev only, exactly the feedback rules (never with a configured audience, never in production) |
+| GOOGLE_MAPS_KEY | | Google Map Tiles API key (rev 4, ADR 0002). Empty → Google is OFF and the day page uses OpenStreetMap exactly as before. Never logged, never rendered, never sent to a browser: it appears only inside the upstream request URL. `googleTilesEnabled(config)` = `googleMapsKey !== ""` |
+| TILE_DAILY_CAP | 2500 | hard stop on upstream tile requests per Bangkok day (rev 4). A non-negative integer (`0` = none allowed); anything else throws at boot. Sits under the owner-side Google quota override (3 000/day) |
 
-Production values arrive through the deploy payload `.env` rendered by CI from repo secrets (§11); nothing is baked into the image or the compose file. `SINOTRACK_SERVER` must be https (boot throws otherwise).
+Production values arrive through the deploy payload `.env` rendered by CI from repo secrets (§11); nothing is baked into the image or the compose file. `SINOTRACK_SERVER` must be https (boot throws otherwise). `TILE_DAILY_CAP` must be a non-negative integer (boot throws otherwise; empty = the default).
 
 ## 2. Checked-in config (`config/`, shipped in the image)
 `config/sites.json`
@@ -245,6 +247,19 @@ CREATE TABLE daily_mileage (teid TEXT NOT NULL, ymd TEXT NOT NULL, mileage_m INT
 CREATE TABLE obd_rows (teid TEXT NOT NULL, t INTEGER NOT NULL, obd TEXT NOT NULL, fetched_at INTEGER NOT NULL, PRIMARY KEY (teid, t));
 CREATE TABLE poll_log (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, ok INTEGER NOT NULL, points_seen INTEGER, points_new INTEGER, error TEXT);
 ```
+Schema v2 (rev 4, the Google tile proxy; `SCHEMA_VERSION = 2`, migration on `PRAGMA user_version` like v1):
+```sql
+CREATE TABLE tile_cache (z INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, fetched_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, etag TEXT, content_type TEXT NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY (z, x, y)) WITHOUT ROWID;
+CREATE TABLE tile_usage (ymd TEXT PRIMARY KEY, upstream INTEGER NOT NULL DEFAULT 0, hits INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE map_session (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
+```
+`tile_cache` is metadata only. **Tile bytes live on DISK at `DATA_DIR/tiles/<z>/<x>/<y>`, never in SQLite**, so the nightly `VACUUM INTO` backup stays small
+(files are written tmp + rename). `tile_usage.upstream` counts upstream tile requests ATTEMPTED per Bangkok day (the billable thing, and what the cap is
+compared with), `hits` the tiles served from disk. `map_session` is the single Google session token (id = 1). Repository functions: `getTileMeta`,
+`upsertTileMeta`, `deleteTileMeta`, `tileCacheBytes`, `oldestTileMeta`, `getTileUsage`, `bumpTileUsage`, `getMapSession`, `setMapSession`, `clearMapSession`.
+`tile_cache` and the tile files are a cache: both may be deleted at any time and are rebuilt lazily; `tile_usage` is kept forever (one row a day).
+
 Points are `INSERT OR IGNORE` (first observation wins). Raw rows are kept forever (~300/day). `poll_log` keeps the newest 2000 rows.
 Repository functions: `insertPoints(rows)`, `pointsForDay(teid, ymd)` (Bangkok day), `pointsBetween(teid, fromS, toS)`,
 `upsertDeviceStatus`, `upsertDailyMileage`, `insertObdRows`, `logPoll`, `latestPoll()`.
@@ -269,8 +284,22 @@ Auth: every route except `/healthz` and `/feed/*` requires a valid `Cf-Access-Jw
 | GET /api/week/:ymd | `{ days: DayReport[] }` 7 days ending at ymd (summary fields only, no trips/stops/path) |
 | GET /feed/daily?date=YYYY-MM-DD | DayReport JSON (§9) with stop spans, bearer-gated, internal only |
 | GET /feed/range?from=&to= | `{ days: DayReport[] }` inclusive, max 62 days, summary fields only |
+| GET /tiles/:z/:x/:y | rev 4, Access-gated. `z`, `x`, `y` integers with 0 ≤ z ≤ 22 and 0 ≤ x, y < 2^z, else 400 `{error:'bad-tile'}`. The tile bytes with `content-type`, our `cache-control` (always `private`; `private, max-age=<remaining s>` for a stored tile or a hit, `private, max-age=<Google's>` or `private, no-store` for a pass-through) and `x-content-type-options: nosniff`. Google off → 404 `{error:'tiles-disabled'}`; today's `upstream` ≥ `TILE_DAILY_CAP` and no fresh cached copy → 503 `{error:'tile-budget'}`; upstream failure → 502 `{error:'tile-upstream'}` |
+| GET /api/map/attribution?zoom=&north=&south=&east=&west= | rev 4, Access-gated. `{ copyright }` from Google's viewport call (cached in memory per zoom + bbox rounded to 2 dp, 10 min; not counted against the cap). Bad params (zoom integer 0–22, lat ±90 with north ≥ south, lon ±180) → 400 `{error:'bad-params'}`; disabled → 404; upstream failure → 502 |
+| GET /api/map/status | rev 4, Access-gated. `{ enabled, cap, today:{ymd,upstream,hits}, session:{expiresAt}\|null, lastUpstream:{at,status,cacheControl,contentType,etag:boolean}\|null }`, or `{enabled:false}` when Google is off. `lastUpstream` is the last upstream TILE response, in memory: how the owner reads Google's real Cache-Control once a key exists. Never contains the key, a URL or the session token |
 | GET /robots.txt | `Disallow: /` |
 Invalid ymd → 400 JSON `{error:'bad-date'}`. Unknown route → 404.
+
+### 7.1 The Google tile proxy (rev 4, `src/server/tiles.ts`, ADR 0002)
+`createTileService({ db, config, dataDir, fetch?, now, log? }) → { getTile(z,x,y), attribution(q), status() }`; `Deps.tiles`. Google endpoints (constants in the module):
+`POST https://tile.googleapis.com/v1/createSession?key=K` (JSON `{"mapType":"roadmap","language":"th","region":"TH"}`; the answer's `session` and `expiry` — epoch seconds in a STRING),
+`GET https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session=S&key=K` and `GET https://tile.googleapis.com/tile/v1/viewport?session=S&key=K&zoom&north&south&east&west` (note the `/tile/v1/` path).
+- **Session:** created lazily, persisted in `map_session`, renewed when `expires_at − now < 86400`, and renewed ONCE with a single retry of the call when a tile or viewport call answers 400/401/403 whose body says the session is expired or invalid (a bad key is not retried). Each call has a 20 s timeout.
+- **Cache (only as Google's Cache-Control allows):** a 200 is STORED iff `!no-store && !private && !no-cache && max-age > 0` (the `no-cache` clause is stricter than the Terms need); a HIT is a meta row + the file + `now < expires_at`, counted in `hits`, and served even over the cap. **A stale tile is never served**: stale with an ETag → conditional GET (`If-None-Match`; a 304 refreshes `expires_at` from its own Cache-Control, else the previous max-age; a 304 that turns the tile private drops it), stale without one → refetch, over the cap → `over-cap`. A tile that is not storable is passed through and never written. Nothing is pre-fetched.
+- **Daily hard stop:** before ANY upstream tile request (a conditional one and the retry after a session renewal included) `tile_usage.upstream` (Bangkok day, `shared/time.ts`) is compared with `TILE_DAILY_CAP`, and each attempt is counted whether or not it succeeds. Session and viewport calls are not counted. Concurrent `getTile` calls for one z/x/y share one upstream request.
+- **Disk bound:** `TILE_CACHE_MAX_BYTES` = 200 MiB; after a store, over it evicts the oldest `fetched_at` until under 90 %.
+- **Secret hygiene:** the key appears only in the upstream URL. No URL, request, response body or exception message is logged or returned; log lines are `tiles: upstream 403 12/3200/1900`, `tiles: session created`, `tiles: viewport 403`. A network failure or timeout is `upstream-error` with status 0.
+- `TileResult` = `ok {body, contentType, cacheControl}` | `over-cap` | `upstream-error {status}` | `disabled`. With `GOOGLE_MAPS_KEY` empty every call answers `disabled` and touches neither the network nor the disk.
 
 ## 8. Pages (server-rendered HTML strings in `src/server/pages/*.ts`, no framework, Thai primary with English secondary text)
 Day page: header (date, prev/next day, week link), device line (last seen, voltage, moving/parked), summary tiles
@@ -296,6 +325,12 @@ no-JS initial text); the ES5 map script sets `textContent` from it on every sele
 line's range, the dated engine text (plain, unescaped, empty with no off event) and `duration` (exactly the table's duration cell, plain text) — and a stop
 marker's popup is built from it (`<b>place</b><br>range (duration)` plus the badge and engine line), so the popup, the table and the Viewing line
 never disagree; a missing entry falls back to the day-clipped popup.
+Basemap modes (rev 4, ADR 0002). `renderDayPage` takes `basemap: 'google' | 'osm'` (default `osm`) and `basemapPaused: boolean`; `/day/:ymd` passes `google` iff `googleTilesEnabled(config)`, and `basemapPaused` when today's `upstream ≥ TILE_DAILY_CAP` at render time. `pageHeaders(nonce, extra?, basemap = 'osm')` sets the CSP `img-src`.
+`map-data` gains `basemap` and, in Google mode, `attributionUrl: '/api/map/attribution'` and `logo` (the data URI).
+- **`osm` (Google off):** exactly the page as before, byte for byte — the OSM tile layer with its Referer opt-in, the CSP `img-src 'self' data: https://tile.openstreetmap.org`, no note, no footer.
+- **`google`:** there is **NO OpenStreetMap anywhere on the page** — Google's Terms 3.2.3(e) forbid its map "with or near a non-Google map", so not in the CSP (`img-src 'self' data:`), not in the markup, not in the script (`mapScript('google')` is built from a separate snippet so the OSM URL is absent by construction), and never as a fallback. The script (ES5, silent failures, `textContent`/`esc` rules as before) adds `L.tileLayer('/tiles/{z}/{x}/{y}', { maxZoom: 19, tileSize: 256 })`; on `moveend`, debounced 400 ms, fetches the attribution for the current zoom and bounds and swaps it into `map.attributionControl` (removes the previous string, `addAttribution(esc(copyright))`); and adds a bottom-left `L.Control` holding the official Google Maps logo `<img alt="Google Maps">`, 18 px high, 10 px clear space at the sides and top, kept clear of the attribution (which is held to the width the logo leaves it). The logo is Google's own unmodified `GoogleMaps_Logo_WithLightOutline.svg` from `Google_Maps_Attribution_Assets.zip` (linked from the Map Tiles policies page, on developers.google.com), embedded as a data URI in `src/server/pages/googleLogo.ts`; never redrawn.
+  A server-rendered `<p class="note" id="map-note">` (label `basemapPaused`: `แผนที่พื้นหลังหยุดชั่วคราว (เกินโควตาวันนี้หรือโหลดไม่ได้) — เส้นทางยังแสดงครบ` / `Basemap paused (today's quota reached or unavailable) — the route is still shown`) is `hidden` unless `basemapPaused`; the first `tileerror` unhides it. Over the cap or on an upstream error the route and stops stay drawn on a blank basemap.
+  The layout footer (Terms 3.2.2(a)(i)) reads `แผนที่ · Map: Google Maps · ` followed by links to `https://maps.google.com/help/terms_maps/` (`ข้อกำหนด · Terms`) and `https://policies.google.com/privacy` (`ความเป็นส่วนตัว · Privacy`), each `rel="noreferrer noopener" target="_blank"`. The paused-note, logo and footer styles live in a second nonce'd `<style>` block (Google mode only), never a `style=` attribute.
 Week page: one row per day (date link, km, trips, round trips, first departure, last arrival, findings by kind, points).
 Labels live in `src/shared/labels.ts` as `{ th, en }` pairs (`L`), rendered as "ไทย · English".
 Branding: HF One staff burgundy like feedback's /staff (not the crimson guest palette). Mobile-first, works on a phone.
@@ -366,13 +401,13 @@ Rounding happens only in the report layer: km to 1 dp, ratio to 2 dp of the unro
 concurrency `deploy-hfville-linen-truck`, steps copied from `~/HF/ev-charging-hotel/.github/workflows/deploy.yml` with the SAME action SHA pins: buildx, ghcr login,
 metadata (sha long + latest), build-push (`platforms: linux/amd64`, build-arg `GIT_SHA`, registry buildcache), render `deploy.env` from secrets
 `TRUCK_CF_ACCESS_AUD→CF_ACCESS_AUD`, `TRUCK_FEED_TOKEN→FEED_TOKEN`, `TRUCK_SINOTRACK_USER→SINOTRACK_USER`, `TRUCK_SINOTRACK_PASSWORD→SINOTRACK_PASSWORD`,
-plus constants `SINOTRACK_SERVER=https://242.sinotrack.com`, `PUBLIC_URL=https://truck.thehfhotel.org`, `TRUCK_SHA=${GITHUB_SHA}`; gate step refusing `ALLOW_DEV_AUTH` in the payload;
+plus `TRUCK_GOOGLE_MAPS_KEY→GOOGLE_MAPS_KEY` (rev 4; unset → the empty value is dropped → Google stays off), plus constants `SINOTRACK_SERVER=https://242.sinotrack.com`, `PUBLIC_URL=https://truck.thehfhotel.org`, `TRUCK_SHA=${GITHUB_SHA}`; gate step refusing `ALLOW_DEV_AUTH` in the payload;
 pinned cloudflared install (same version + sha256 as evcharge); SSH key + known_hosts from `TRUCK_DEPLOY_SSH_KEY` / `HFVILLE_HOST_KEY`; payload = tar of `docker-compose.hfville.yml`
 renamed `docker-compose.yml` + env JSON, piped to `${{ secrets.HFVILLE_SSH_TARGET }}` through `cloudflared access ssh --service-token-id ${{ secrets.CF_ACCESS_CLIENT_ID }} --service-token-secret ${{ secrets.CF_ACCESS_CLIENT_SECRET }}`.
 `Dockerfile`: `ARG GIT_SHA` baked as `ENV GIT_SHA` (evcharge style) so /healthz reports the built commit without the compose env; otherwise as rev 1 (no build step).
 `docker-compose.hfville.yml` (shipped as the box's docker-compose.yml): service `truck`, `image: ghcr.io/thehfhotel/linen-truck:${TRUCK_SHA:-latest}`, `container_name: truck`,
 `restart: unless-stopped`, `ports: ["4100:4100"]`, environment NODE_ENV=production, TZ, PORT=4100, DATA_DIR=/data, PUBLIC_URL, CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD, FEED_TOKEN,
-SINOTRACK_SERVER/USER/PASSWORD/TEID, POLL_INTERVAL_SECONDS, BACKUP_TIME; volume `./data:/data`; json-file logging 10m×3; limits memory 256M cpus 0.5.
+SINOTRACK_SERVER/USER/PASSWORD/TEID, POLL_INTERVAL_SECONDS, BACKUP_TIME, GOOGLE_MAPS_KEY (`${GOOGLE_MAPS_KEY:-}`), TILE_DAILY_CAP (`${TILE_DAILY_CAP:-2500}`); volume `./data:/data`; json-file logging 10m×3; limits memory 256M cpus 0.5.
 The plain `docker-compose.yml` stays for local runs (build from Dockerfile, `image: truck:local`).
 
 ## 12. Consumers outside this repo (rev 2)
@@ -388,11 +423,11 @@ Workflow logs, code, history, issues and Actions summaries are world-readable. R
   Fixtures use the synthetic device id `1000000001` (test/fixtures/*). Hotel coordinates in config/sites.json are public business locations and stay.
 - **Secrets (GitHub Actions, masked in logs):** `TRUCK_DEPLOY_SSH_KEY`, `HFVILLE_HOST_KEY`, `HFVILLE_SSH_TARGET` (user@host for the tunnel SSH hop),
   `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`, `TRUCK_CF_ACCESS_AUD`, `TRUCK_FEED_TOKEN`, `TRUCK_SINOTRACK_USER`, `TRUCK_SINOTRACK_PASSWORD`,
-  `TRUCK_SINOTRACK_SERVER`, `TRUCK_PUBLIC_URL`. Repo variable (not secret, still never echoed): `TRUCK_DEPLOY_ENABLED`.
+  `TRUCK_SINOTRACK_SERVER`, `TRUCK_PUBLIC_URL`, `TRUCK_GOOGLE_MAPS_KEY` (rev 4, optional: the Map Tiles API key, restricted to that API; unset = Google off). Repo variable (not secret, still never echoed): `TRUCK_DEPLOY_ENABLED`.
   Workflows must never `echo`/`cat`/`set -x` any rendered env; only counts (`wc -l`) may be printed. The SSH ProxyCommand line must reference secrets, never literals.
 - **CI secret gates:** (a) `scripts/check-no-secrets.sh` — greps tracked files for the forbidden classes (10-digit numbers other than the synthetic id
   and epoch timestamps, `password=`/`token=` with a value, `192.168.`, `10.10.10.`, `100.64.`, `.cfargotunnel.com` with a real id, hex aud-like 64-char strings outside lockfiles)
-  and exits 1 with the matching lines; runs in ci.yml before typecheck. (b) `.github/workflows/security.yml` — Trivy `fs` scan with `scanners: vuln,secret`
+  a Google API key (`AIza` + 35 characters, rev 4), and exits 1 with the matching lines; runs in ci.yml before typecheck. (b) `.github/workflows/security.yml` — Trivy `fs` scan with `scanners: vuln,secret`
   and `config` scan, SHA-pinned exactly as `~/HF/ev-charging-hotel/.github/workflows/security.yml`, on push/PR/weekly, `permissions: contents: read`.
 - **.gitignore** keeps `.env`, `.env.*` (except `.env.example`), `data/`, `*.db*`, `deploy.env`, `payload/`, `*.pem`, `*.key`.
   `.env.example` contains placeholders only (`SINOTRACK_USER=<10-digit device id>`).

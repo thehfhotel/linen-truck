@@ -181,6 +181,10 @@ scan "credential assignment with a literal value" "${CRED_NAME}=$VALUE_START"
 scan "Cloudflare service-token client id"          '\b[0-9a-f]{32}\.access\b'
 # An OpenSSH private key must never be committed, whatever the filename.
 scan "private key material"           '-----BEGIN [A-Z ]*PRIVATE KEY'
+# A Google API key (the Map Tiles key behind TRUCK_GOOGLE_MAPS_KEY): the literal
+# prefix plus 35 URL-safe characters. Reports the whole line; the key itself lives
+# only in that GitHub secret and in the box's .env.
+scan "Google API key (AIza + 35 chars)" 'AIza[0-9A-Za-z_-]{35}'
 
 if [ "$findings" -gt 0 ]; then
   cat >&2 <<'MSG'

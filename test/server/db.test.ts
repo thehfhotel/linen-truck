@@ -3,18 +3,28 @@
 import { describe, expect, test } from "bun:test";
 import {
   bangkokDaySeconds,
+  bumpTileUsage,
+  clearMapSession,
+  deleteTileMeta,
   deviceStatusFromRaw,
+  getMapSession,
+  getTileMeta,
+  getTileUsage,
   getDeviceStatus,
   insertObdRows,
   insertPoints,
   latestPoll,
   logPoll,
+  oldestTileMeta,
   openDatabase,
   pointRowFromRaw,
   pointsForDay,
+  setMapSession,
+  tileCacheBytes,
   upsertDailyMileage,
   dailyMileage,
   upsertDeviceStatus,
+  upsertTileMeta,
   voltageFromOther,
   type PointRow,
 } from "../../src/server/db.ts";
@@ -184,5 +194,87 @@ describe("poll_log", () => {
     const count = db.query("SELECT COUNT(*) AS c FROM poll_log").get() as { c: number };
     expect(count.c).toBe(2000);
     expect(latestPoll(db)?.at).toBe(2009);
+  });
+});
+
+describe("the tile proxy tables (schema v2)", () => {
+  const meta = (x: number, over: Partial<Parameters<typeof upsertTileMeta>[1]> = {}) => ({
+    z: 12,
+    x,
+    y: 5,
+    fetchedAt: 1000 + x,
+    expiresAt: 2000,
+    etag: '"e"' as string | null,
+    contentType: "image/png",
+    bytes: 100,
+    ...over,
+  });
+
+  test("migration v2 creates the three tables on a fresh database and on a v1 one", () => {
+    const fresh = openDatabase(":memory:");
+    const tables = (fresh.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name);
+    expect(tables).toEqual(expect.arrayContaining(["tile_cache", "tile_usage", "map_session"]));
+    expect((fresh.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2);
+  });
+
+  test("a v1 database (points already there) upgrades without losing rows", async () => {
+    const { Database } = await import("bun:sqlite");
+    const { migrate } = await import("../../src/server/db.ts");
+    const db = new Database(":memory:");
+    db.run("CREATE TABLE points (teid TEXT NOT NULL, t INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, speed INTEGER NOT NULL, direction INTEGER, mileage_m INTEGER, car_state INTEGER, te_state INTEGER, alarm_state INTEGER, voltage REAL, other TEXT, fetched_at INTEGER NOT NULL, PRIMARY KEY (teid, t)) WITHOUT ROWID");
+    db.run("CREATE TABLE device_status (teid TEXT PRIMARY KEY, t INTEGER, lat REAL, lon REAL, speed INTEGER, mileage_m INTEGER, voltage REAL, park_since INTEGER, run_since INTEGER, fetched_at INTEGER NOT NULL)");
+    db.run("CREATE TABLE daily_mileage (teid TEXT NOT NULL, ymd TEXT NOT NULL, mileage_m INTEGER NOT NULL, fetched_at INTEGER NOT NULL, PRIMARY KEY (teid, ymd))");
+    db.run("CREATE TABLE obd_rows (teid TEXT NOT NULL, t INTEGER NOT NULL, obd TEXT NOT NULL, fetched_at INTEGER NOT NULL, PRIMARY KEY (teid, t))");
+    db.run("CREATE TABLE poll_log (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, ok INTEGER NOT NULL, points_seen INTEGER, points_new INTEGER, error TEXT)");
+    db.run("INSERT INTO points VALUES ('1000000001', 1788585018, 9.1, 99.3, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1)");
+    db.run("PRAGMA user_version = 1");
+    migrate(db);
+    expect((db.query("SELECT COUNT(*) AS c FROM points").get() as { c: number }).c).toBe(1);
+    expect(getTileMeta(db, 1, 1, 1)).toBeNull();
+    migrate(db); // idempotent
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2);
+  });
+
+  test("tile meta: upsert, read back, replace on the same z/x/y, delete", () => {
+    const db = openDatabase(":memory:");
+    expect(getTileMeta(db, 12, 1, 5)).toBeNull();
+    upsertTileMeta(db, meta(1));
+    expect(getTileMeta(db, 12, 1, 5)).toEqual(meta(1));
+    upsertTileMeta(db, meta(1, { etag: null, bytes: 7, expiresAt: 3000 }));
+    expect(getTileMeta(db, 12, 1, 5)).toEqual(meta(1, { etag: null, bytes: 7, expiresAt: 3000 }));
+    deleteTileMeta(db, 12, 1, 5);
+    expect(getTileMeta(db, 12, 1, 5)).toBeNull();
+  });
+
+  test("tileCacheBytes sums, oldestTileMeta orders by fetched_at", () => {
+    const db = openDatabase(":memory:");
+    expect(tileCacheBytes(db)).toBe(0);
+    upsertTileMeta(db, meta(3, { bytes: 30 }));
+    upsertTileMeta(db, meta(1, { bytes: 10 }));
+    upsertTileMeta(db, meta(2, { bytes: 20 }));
+    expect(tileCacheBytes(db)).toBe(60);
+    expect(oldestTileMeta(db, 2).map((m) => m.x)).toEqual([1, 2]);
+  });
+
+  test("tile usage: zeros by default, additive per day", () => {
+    const db = openDatabase(":memory:");
+    expect(getTileUsage(db, "2026-09-05")).toEqual({ ymd: "2026-09-05", upstream: 0, hits: 0 });
+    bumpTileUsage(db, "2026-09-05", { upstream: 1 });
+    bumpTileUsage(db, "2026-09-05", { hits: 1 });
+    bumpTileUsage(db, "2026-09-05", { upstream: 1, hits: 2 });
+    bumpTileUsage(db, "2026-09-06", { hits: 1 });
+    expect(getTileUsage(db, "2026-09-05")).toEqual({ ymd: "2026-09-05", upstream: 2, hits: 3 });
+    expect(getTileUsage(db, "2026-09-06")).toEqual({ ymd: "2026-09-06", upstream: 0, hits: 1 });
+  });
+
+  test("map session: a single row, replaced, cleared", () => {
+    const db = openDatabase(":memory:");
+    expect(getMapSession(db)).toBeNull();
+    setMapSession(db, "tok-1", 500, 100);
+    setMapSession(db, "tok-2", 900, 200);
+    expect(getMapSession(db)).toEqual({ token: "tok-2", expiresAt: 900, createdAt: 200 });
+    expect((db.query("SELECT COUNT(*) AS c FROM map_session").get() as { c: number }).c).toBe(1);
+    clearMapSession(db);
+    expect(getMapSession(db)).toBeNull();
   });
 });

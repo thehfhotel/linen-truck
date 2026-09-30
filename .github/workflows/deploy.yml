@@ -161,12 +161,15 @@ jobs:
           SINOTRACK_PASSWORD: ${{ secrets.TRUCK_SINOTRACK_PASSWORD }}
           SINOTRACK_SERVER:   ${{ secrets.TRUCK_SINOTRACK_SERVER }}
           PUBLIC_URL:         ${{ secrets.TRUCK_PUBLIC_URL }}
+          # Empty (secret unset) = the line is dropped below and Google stays OFF:
+          # the day page keeps OpenStreetMap until the owner sets the key.
+          GOOGLE_MAPS_KEY:    ${{ secrets.TRUCK_GOOGLE_MAPS_KEY }}
         run: |
           set -euo pipefail
           umask 077
           : > deploy.env
           for k in CF_ACCESS_AUD FEED_TOKEN SINOTRACK_USER SINOTRACK_PASSWORD \
-                   SINOTRACK_SERVER PUBLIC_URL; do
+                   SINOTRACK_SERVER PUBLIC_URL GOOGLE_MAPS_KEY; do
             v="${!k:-}"
             [ -n "$v" ] && printf '%s=%s\n' "$k" "$v" >> deploy.env
           done

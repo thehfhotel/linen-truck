@@ -36,14 +36,15 @@ import { SPAN_WINDOW_DAYS, stopSpans } from "../domain/span.ts";
 import { summarizeDay } from "../domain/summary.ts";
 import { addBangkokDays, bangkokDay } from "../shared/time.ts";
 import { authenticateStaff } from "./auth.ts";
-import { loadConfig, sinotrackConfigured, type Config } from "./config.ts";
-import { bangkokDaySeconds, getDeviceStatus, latestPoll, pointsBetween, pointsForDay } from "./db.ts";
+import { googleTilesEnabled, loadConfig, sinotrackConfigured, type Config } from "./config.ts";
+import { bangkokDaySeconds, getDeviceStatus, latestPoll, openDatabase, pointsBetween, pointsForDay } from "./db.ts";
 import type { PollerStatus } from "./poller.ts";
 import { renderDayPage } from "./pages/day.ts";
-import { newNonce, pageHeaders } from "./pages/layout.ts";
+import { newNonce, pageHeaders, type Basemap } from "./pages/layout.ts";
 import { renderWeekPage } from "./pages/week.ts";
 import { buildDayReport, summaryOnly, type DayReport } from "./report.ts";
 import { loadRules, loadSites } from "./siteConfig.ts";
+import { createTileService, type TileService } from "./tiles.ts";
 
 export interface Deps {
   now: () => Date;
@@ -53,6 +54,8 @@ export interface Deps {
   rules: Rules;
   /** The live poller's in-memory status (§6); a dormant default in tests. */
   pollerStatus: () => PollerStatus;
+  /** The Google tile proxy (§7). Inert (`disabled`) while GOOGLE_MAPS_KEY is empty. */
+  tiles: TileService;
 }
 
 const DORMANT: PollerStatus = {
@@ -64,15 +67,25 @@ const DORMANT: PollerStatus = {
   lastNew: null,
 };
 
-export function resolveDeps(partial?: Partial<Deps>): Deps {
+/**
+ * `db` is only needed to build the default tile service; `createApp` passes it,
+ * and `server.ts` builds its own service explicitly, so a caller that has neither
+ * (a test resolving deps for `dayReport`) still gets a complete `Deps`.
+ */
+export function resolveDeps(partial?: Partial<Deps>, db?: Database): Deps {
   const config = partial?.config ?? loadConfig(process.env);
+  const now = partial?.now ?? (() => new Date());
+  const doFetch = partial?.fetch ?? globalThis.fetch;
   return {
-    now: partial?.now ?? (() => new Date()),
-    fetch: partial?.fetch ?? globalThis.fetch,
+    now,
+    fetch: doFetch,
     config,
     sites: partial?.sites ?? loadSites(),
     rules: partial?.rules ?? loadRules(),
     pollerStatus: partial?.pollerStatus ?? (() => ({ ...DORMANT, configured: sinotrackConfigured(config) })),
+    tiles:
+      partial?.tiles ??
+      createTileService({ db: db ?? openDatabase(":memory:"), config, dataDir: config.dataDir, fetch: doFetch, now }),
   };
 }
 
@@ -208,8 +221,43 @@ export function authorizeFeed(request: Request, deps: Deps): Response | null {
 /** How many days `/feed/range` will answer in one call (§7). */
 export const RANGE_MAX_DAYS = 62;
 
+// ── the Google basemap (rev 4) ──────────────────────────────────────────────
+
+/** Which basemap a page draws: Google only while a key is configured (§8). */
+const basemapOf = (deps: Deps): Basemap => (googleTilesEnabled(deps.config) ? "google" : "osm");
+
+/** A base-10 unsigned integer string, or null. Rejects signs, decimals, exponents, hex, blanks. */
+const uint = (raw: unknown): number | null => {
+  if (typeof raw !== "string" || !/^[0-9]{1,9}$/.test(raw)) return null;
+  return Number(raw);
+};
+
+/** A finite decimal number string (no NaN/Infinity, no blanks), or null. */
+const decimal = (raw: string | null): number | null => {
+  if (raw === null || !/^-?[0-9]+(\.[0-9]+)?$/.test(raw)) return null;
+  return Number(raw);
+};
+
+/**
+ * `zoom` 0..22 as an integer; `north`/`south` within ±90 with north >= south;
+ * `east`/`west` within ±180 (east < west is legal: a box across the antimeridian).
+ */
+function parseViewport(
+  params: URLSearchParams,
+): { zoom: number; north: number; south: number; east: number; west: number } | null {
+  const zoom = uint(params.get("zoom"));
+  const north = decimal(params.get("north"));
+  const south = decimal(params.get("south"));
+  const east = decimal(params.get("east"));
+  const west = decimal(params.get("west"));
+  if (zoom === null || zoom > 22 || north === null || south === null || east === null || west === null) return null;
+  if (Math.abs(north) > 90 || Math.abs(south) > 90 || north < south) return null;
+  if (Math.abs(east) > 180 || Math.abs(west) > 180) return null;
+  return { zoom, north, south, east, west };
+}
+
 export function createApp(db: Database, partial?: Partial<Deps>): Elysia {
-  const deps = resolveDeps(partial);
+  const deps = resolveDeps(partial, db);
 
   /** The Access guard every route but `/healthz` and `/feed/*` runs first. */
   const guard = async (request: Request): Promise<Response | null> => {
@@ -308,6 +356,7 @@ export function createApp(db: Database, partial?: Partial<Deps>): Elysia {
     if (!isYmd(ymd)) return fail("bad-date", 400);
     const today = todayYmd(deps);
     const nonce = newNonce();
+    const basemap = basemapOf(deps);
     const html = renderDayPage({
       report: dayReport(db, deps, ymd, { spans: true }),
       sites: deps.sites,
@@ -317,8 +366,12 @@ export function createApp(db: Database, partial?: Partial<Deps>): Elysia {
       // walking a manager into an empty page.
       nextYmd: ymd >= today ? null : addBangkokDays(ymd, 1),
       todayYmd: today,
+      basemap,
+      // The note shows from the first byte when today's budget is already spent,
+      // rather than waiting for the first tile to fail.
+      basemapPaused: basemap === "google" && deps.tiles.status().today.upstream >= deps.config.tileDailyCap,
     });
-    return new Response(html, { headers: pageHeaders(nonce) });
+    return new Response(html, { headers: pageHeaders(nonce, undefined, basemap) });
   });
 
   app.get("/week/:ymd", async ({ request, params }) => {
@@ -334,7 +387,7 @@ export function createApp(db: Database, partial?: Partial<Deps>): Elysia {
       ymd,
       todayYmd: todayYmd(deps),
     });
-    return new Response(html, { headers: pageHeaders(nonce) });
+    return new Response(html, { headers: pageHeaders(nonce, undefined, basemapOf(deps)) });
   });
 
   app.get("/api/day/:ymd", async ({ request, params }) => {
@@ -351,6 +404,66 @@ export function createApp(db: Database, partial?: Partial<Deps>): Elysia {
     const ymd = String(params.ymd);
     if (!isYmd(ymd)) return fail("bad-date", 400);
     return json({ days: weekDays(ymd).map((d) => summaryOnly(dayReport(db, deps, d))) });
+  });
+
+  // ── the Google tile proxy (rev 4) ─────────────────────────────────────────
+
+  app.get("/tiles/:z/:x/:y", async ({ request, params }) => {
+    const refusal = await guard(request);
+    if (refusal) return refusal;
+    const z = uint(params.z);
+    const x = uint(params.x);
+    const y = uint(params.y);
+    if (z === null || x === null || y === null || z > 22) return fail("bad-tile", 400);
+    if (x >= 2 ** z || y >= 2 ** z) return fail("bad-tile", 400);
+
+    let result;
+    try {
+      result = await deps.tiles.getTile(z, x, y);
+    } catch {
+      // The service returns results, it does not throw; and whatever it threw, its
+      // message could quote an upstream URL. Only the fixed error leaves here.
+      return fail("tile-upstream", 502);
+    }
+    switch (result.kind) {
+      case "disabled":
+        return fail("tiles-disabled", 404);
+      case "over-cap":
+        return fail("tile-budget", 503);
+      case "upstream-error":
+        return fail("tile-upstream", 502);
+      case "ok":
+        return new Response(result.body as BodyInit, {
+          headers: {
+            "content-type": result.contentType,
+            "cache-control": result.cacheControl,
+            "x-content-type-options": "nosniff",
+          },
+        });
+    }
+  });
+
+  app.get("/api/map/attribution", async ({ request }) => {
+    const refusal = await guard(request);
+    if (refusal) return refusal;
+    const q = parseViewport(new URL(request.url).searchParams);
+    if (!q) return fail("bad-params", 400);
+    let result;
+    try {
+      result = await deps.tiles.attribution(q);
+    } catch {
+      return fail("tile-upstream", 502);
+    }
+    if (result.kind === "disabled") return fail("tiles-disabled", 404);
+    if (result.kind === "upstream-error") return fail("tile-upstream", 502);
+    return json({ copyright: result.copyright });
+  });
+
+  app.get("/api/map/status", async ({ request }) => {
+    const refusal = await guard(request);
+    if (refusal) return refusal;
+    const status = deps.tiles.status();
+    return json(status.enabled ? status : { enabled: false });
   });
 
   return app;

@@ -28,7 +28,7 @@ import { bangkokDayBounds } from "../shared/time.ts";
 
 // ── schema (§5, verbatim) ───────────────────────────────────────────────────
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA_V1 = `
 CREATE TABLE points (teid TEXT NOT NULL, t INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, speed INTEGER NOT NULL,
@@ -41,6 +41,16 @@ CREATE TABLE obd_rows (teid TEXT NOT NULL, t INTEGER NOT NULL, obd TEXT NOT NULL
 CREATE TABLE poll_log (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, ok INTEGER NOT NULL, points_seen INTEGER, points_new INTEGER, error TEXT);
 `;
 
+// v2 (rev 4): the Google tile proxy. The tile BYTES live on disk under
+// DATA_DIR/tiles/<z>/<x>/<y>, never in SQLite, so the nightly VACUUM INTO backup
+// stays small; `tile_cache` is only the metadata that decides hit / stale / evict.
+const SCHEMA_V2 = `
+CREATE TABLE tile_cache (z INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, fetched_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, etag TEXT, content_type TEXT NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY (z, x, y)) WITHOUT ROWID;
+CREATE TABLE tile_usage (ymd TEXT PRIMARY KEY, upstream INTEGER NOT NULL DEFAULT 0, hits INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE map_session (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
+`;
+
 /** Replays from the stored `PRAGMA user_version`; safe to call on every open. */
 export function migrate(db: Database): void {
   const row = db.query("PRAGMA user_version").get() as { user_version: number };
@@ -48,6 +58,7 @@ export function migrate(db: Database): void {
   if (current >= SCHEMA_VERSION) return;
   db.transaction(() => {
     if (current < 1) db.run(SCHEMA_V1);
+    if (current < 2) db.run(SCHEMA_V2);
     db.run(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   })();
 }
@@ -387,4 +398,123 @@ export function latestPoll(db: Database): PollLogEntry | null {
     pointsNew: row.points_new,
     error: row.error,
   };
+}
+
+// ── Google tile proxy (rev 4, §5) ───────────────────────────────────────────
+
+/** One `tile_cache` row: the metadata of a tile file stored under DATA_DIR/tiles. All times epoch seconds. */
+export interface TileMeta {
+  z: number;
+  x: number;
+  y: number;
+  fetchedAt: number;
+  expiresAt: number;
+  etag: string | null;
+  contentType: string;
+  bytes: number;
+}
+
+interface TileMetaDbRow {
+  z: number;
+  x: number;
+  y: number;
+  fetched_at: number;
+  expires_at: number;
+  etag: string | null;
+  content_type: string;
+  bytes: number;
+}
+
+const toTileMeta = (r: TileMetaDbRow): TileMeta => ({
+  z: r.z,
+  x: r.x,
+  y: r.y,
+  fetchedAt: r.fetched_at,
+  expiresAt: r.expires_at,
+  etag: r.etag,
+  contentType: r.content_type,
+  bytes: r.bytes,
+});
+
+export function getTileMeta(db: Database, z: number, x: number, y: number): TileMeta | null {
+  const row = db.query("SELECT * FROM tile_cache WHERE z = ? AND x = ? AND y = ?").get(z, x, y) as TileMetaDbRow | null;
+  return row ? toTileMeta(row) : null;
+}
+
+/** Insert or replace: a refetch of the same tile overwrites its row. */
+export function upsertTileMeta(db: Database, m: TileMeta): void {
+  db.query(
+    `INSERT INTO tile_cache (z, x, y, fetched_at, expires_at, etag, content_type, bytes) VALUES (?,?,?,?,?,?,?,?)
+     ON CONFLICT(z, x, y) DO UPDATE SET fetched_at = excluded.fetched_at, expires_at = excluded.expires_at,
+       etag = excluded.etag, content_type = excluded.content_type, bytes = excluded.bytes`,
+  ).run(m.z, m.x, m.y, m.fetchedAt, m.expiresAt, m.etag, m.contentType, m.bytes);
+}
+
+export function deleteTileMeta(db: Database, z: number, x: number, y: number): void {
+  db.query("DELETE FROM tile_cache WHERE z = ? AND x = ? AND y = ?").run(z, x, y);
+}
+
+/** Total bytes of every stored tile file, for the disk bound. */
+export function tileCacheBytes(db: Database): number {
+  const row = db.query("SELECT COALESCE(SUM(bytes), 0) AS total FROM tile_cache").get() as { total: number };
+  return row.total;
+}
+
+/** The `limit` oldest tiles by `fetched_at` (eviction order; z, x, y break ties deterministically). */
+export function oldestTileMeta(db: Database, limit: number): TileMeta[] {
+  const rows = db
+    .query("SELECT * FROM tile_cache ORDER BY fetched_at ASC, z ASC, x ASC, y ASC LIMIT ?")
+    .all(Math.max(0, Math.floor(limit))) as TileMetaDbRow[];
+  return rows.map(toTileMeta);
+}
+
+export interface TileUsage {
+  ymd: string;
+  /** Upstream tile requests ATTEMPTED that Bangkok day (the billable thing). */
+  upstream: number;
+  /** Tiles answered from the disk cache. */
+  hits: number;
+}
+
+export function getTileUsage(db: Database, ymd: string): TileUsage {
+  const row = db.query("SELECT upstream, hits FROM tile_usage WHERE ymd = ?").get(ymd) as
+    | { upstream: number; hits: number }
+    | null;
+  return { ymd, upstream: row?.upstream ?? 0, hits: row?.hits ?? 0 };
+}
+
+/** Additive per-day counters. */
+export function bumpTileUsage(db: Database, ymd: string, by: { upstream?: number; hits?: number }): void {
+  const upstream = by.upstream ?? 0;
+  const hits = by.hits ?? 0;
+  db.query(
+    `INSERT INTO tile_usage (ymd, upstream, hits) VALUES (?,?,?)
+     ON CONFLICT(ymd) DO UPDATE SET upstream = upstream + excluded.upstream, hits = hits + excluded.hits`,
+  ).run(ymd, upstream, hits);
+}
+
+export interface MapSession {
+  token: string;
+  /** Epoch seconds, from Google's `expiry`. */
+  expiresAt: number;
+  createdAt: number;
+}
+
+export function getMapSession(db: Database): MapSession | null {
+  const row = db.query("SELECT token, expires_at, created_at FROM map_session WHERE id = 1").get() as
+    | { token: string; expires_at: number; created_at: number }
+    | null;
+  return row ? { token: row.token, expiresAt: row.expires_at, createdAt: row.created_at } : null;
+}
+
+/** The single session row (id = 1): replaced on every renewal. */
+export function setMapSession(db: Database, token: string, expiresAt: number, createdAt: number): void {
+  db.query(
+    `INSERT INTO map_session (id, token, expires_at, created_at) VALUES (1,?,?,?)
+     ON CONFLICT(id) DO UPDATE SET token = excluded.token, expires_at = excluded.expires_at, created_at = excluded.created_at`,
+  ).run(token, expiresAt, createdAt);
+}
+
+export function clearMapSession(db: Database): void {
+  db.query("DELETE FROM map_session WHERE id = 1").run();
 }
