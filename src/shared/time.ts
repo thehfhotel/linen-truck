@@ -122,3 +122,28 @@ export function bangkokDateTime(iso: string): string {
   const w = wallClock(parseIso(iso));
   return `${w.year}-${pad2(w.month)}-${pad2(w.day)} ${pad2(w.hour)}:${pad2(w.minute)}`;
 }
+
+const THAI_MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."] as const;
+
+function parseDay(day: string): { y: number; m: number; d: number } {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!m || Number(m[2]) < 1 || Number(m[2]) > 12) throw new RangeError(`not a YYYY-MM-DD day: ${day}`);
+  return { y: Number(m[1]), m: Number(m[2]), d: Number(m[3]) };
+}
+
+/** `2026-09-30` → `30 ก.ย.` (no zero padding). */
+export function thaiShortDate(day: string): string {
+  const { m, d } = parseDay(day);
+  return `${d} ${THAI_MONTHS[m - 1]}`;
+}
+
+/** `2026-09-30` → `30 ก.ย. 2026` — the Gregorian year, matching the page header. */
+export function thaiLongDate(day: string): string {
+  return `${thaiShortDate(day)} ${parseDay(day).y}`;
+}
+
+/** An instant → `29 ก.ย. 14:34` in Bangkok, through the same wall clock as everything above. */
+export function thaiDateTime(iso: string): string {
+  const stamp = bangkokDateTime(iso); // "YYYY-MM-DD HH:MM"
+  return `${thaiShortDate(stamp.slice(0, 10))} ${stamp.slice(11)}`;
+}

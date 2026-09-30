@@ -10,9 +10,11 @@
 // there is no second serialisation to keep in step. The page ships only what the
 // script cannot fetch — the site circles and the handful of label strings.
 
+import { bangkokYmd, isoAt } from "../../domain/clock.ts";
 import type { Site } from "../../domain/types.ts";
 import { LABELS, pair, tripLabel, type L } from "../../shared/labels.ts";
-import { bangkokStamp, type DayReport, type ReportStop, type ReportTrip } from "../report.ts";
+import { thaiDateTime, thaiLongDate, thaiShortDate } from "../../shared/time.ts";
+import { bangkokStamp, hhmm, type DayReport, type ReportStop, type ReportTrip } from "../report.ts";
 import {
   escapeHtml,
   LEAFLET_CSS_SRI,
@@ -71,22 +73,51 @@ function engineBadge(stop: ReportStop): string {
   return ` <span class="badge engine-${escapeHtml(stop.engine)}" title="${escapeHtml(pair(label))}">${escapeHtml(label.th)}</span>`;
 }
 
-/** `12:27 → 13:32`, `12:27 →` while the engine never came back, `—` with no off event. */
-function engineTimes(stop: ReportStop): string {
-  if (stop.engineOffAt === null) return dash;
-  return stop.engineOnAt === null
-    ? `${escapeHtml(stop.engineOffAt)} →`
-    : `${escapeHtml(stop.engineOffAt)} → ${escapeHtml(stop.engineOnAt)}`;
+/** `29 ก.ย. 14:34` — an epoch instant as a Bangkok date and time. */
+const dateTimeAt = (epochS: number): string => thaiDateTime(isoAt(epochS));
+
+/**
+ * The ignition times as plain text: `12:27 → 13:32` with dates, `12:27 →` while
+ * the engine never came back, `''` with no off event. Reads the stop's SPAN
+ * values, so an ignition event that happened on another day says which one.
+ * Unescaped — the table escapes it, and the map script escapes it for its popup.
+ */
+function engineText(stop: ReportStop): string {
+  if (stop.spanEngineOffAt === null) return "";
+  const off = dateTimeAt(stop.spanEngineOffAt);
+  return stop.spanEngineOnAt === null ? `${off} →` : `${off} → ${dateTimeAt(stop.spanEngineOnAt)}`;
 }
+
+/** The table cell: the same text, or `—` where there is no off event. */
+const engineTimes = (stop: ReportStop): string => {
+  const text = engineText(stop);
+  return text === "" ? dash : escapeHtml(text);
+};
+
+/**
+ * Does the stop's real extent reach outside what the day counted? Then its
+ * `minutes` (which stays within the day, so the summary totals do not move) is
+ * only part of the story and the cell says so with a `*`.
+ */
+const runsPastDay = (stop: ReportStop): boolean =>
+  stop.spanArriveAt < stop.arriveAt || stop.spanDepartAt === null || stop.spanDepartAt > stop.departAt;
+
+/** The arrival as the stops table prints it: dated, and `ก่อน` when the data only bounds it. */
+const arrivalText = (stop: ReportStop): string =>
+  `${stop.spanArriveOpen ? `${LABELS.arrivedBefore.th} ` : ""}${dateTimeAt(stop.spanArriveAt)}`;
 
 function stopRow(stop: ReportStop, sites: readonly Site[], index: number): string {
   const virtualLabel =
     stop.virtual === "track-start" ? LABELS.trackStart : stop.virtual === "track-end" ? LABELS.trackEnd : null;
   const place = virtualLabel ?? siteLabel(sites, stop.site);
+  const depart =
+    stop.spanDepartAt === null
+      ? `<td title="${escapeHtml(pair(LABELS.stillParked))}">${escapeHtml(LABELS.stillParked.th)}</td>`
+      : `<td>${escapeHtml(dateTimeAt(stop.spanDepartAt))}</td>`;
   return `<tr data-stop="${index}"${stop.virtual ? ' class="virtual"' : ""}>
-<td><button type="button" class="rowlink" data-select="stop-${index}" title="${escapeHtml(pair(LABELS.showStopOnMap))}">${escapeHtml(stop.arrive)}</button></td>
-<td>${escapeHtml(stop.depart)}</td>
-<td class="num">${stop.minutes}</td>
+<td><button type="button" class="rowlink" data-select="stop-${index}" title="${escapeHtml(pair(LABELS.showStopOnMap))}">${escapeHtml(arrivalText(stop))}</button></td>
+${depart}
+<td class="num">${stop.minutes}${runsPastDay(stop) ? "*" : ""}</td>
 <td><a href="${escapeHtml(stop.mapUrl)}" rel="noreferrer noopener" target="_blank">${escapeHtml(place.th)}</a>${engineBadge(stop)}</td>
 <td class="num">${stop.engineOnMin}</td>
 <td>${engineTimes(stop)}</td>
@@ -128,6 +159,72 @@ function chipsHtml(report: DayReport, sites: readonly Site[]): string {
     return `<button type="button" class="chip" data-select="trip-${trip.n}" aria-pressed="false">${escapeHtml(label)}</button>`;
   });
   return `<div class="chips" id="trip-chips" role="group" aria-label="${escapeHtml(pair(LABELS.mapHeading))}">${[allChip, ...tripChips].join("")}</div>`;
+}
+
+/**
+ * What the map is showing, in words, for every `data-select` key the page
+ * renders. Computed here rather than in the browser so the script never does
+ * date arithmetic (and so the no-JS page has the same wording): it just picks a
+ * string. `all` is always present; a key missing here makes the script fall back
+ * to it.
+ */
+function mapViews(report: DayReport, sites: readonly Site[]): Record<string, string> {
+  const day = thaiShortDate(report.date);
+  const views: Record<string, string> = { all: `${LABELS.allDayChip.th} · ${thaiLongDate(report.date)}` };
+  const trips = report.trips ?? [];
+
+  for (const trip of trips) {
+    views[`trip-${trip.n}`] = `${tripSelectLabel(trip.n)} · ${day} ${trip.start}–${trip.end}`;
+  }
+  // A detour is one leg over several trips: the button selects `trip-N-M`, and
+  // the label is the trips' combined range.
+  for (const f of report.findings) {
+    if (f.kind !== "detour") continue;
+    const members = f.trips.map((n) => trips.find((t) => t.n === n));
+    if (members.some((t) => t === undefined)) continue;
+    const first = members[0]!;
+    const last = members[members.length - 1]!;
+    views[`trip-${f.trips.join("-")}`] =
+      `${f.trips.map(tripSelectLabel).join(" + ")} · ${day} ${first.start}–${last.end}`;
+  }
+  (report.stops ?? []).forEach((stop, i) => {
+    views[`stop-${i}`] = `${stopPlace(stop, sites)} · ${stopRange(stop)}`;
+  });
+  return views;
+}
+
+/** A stop's place label for the Viewing line and the marker popup: the virtual label, or the site's / unknown Thai name. */
+function stopPlace(stop: ReportStop, sites: readonly Site[]): string {
+  const virtualLabel =
+    stop.virtual === "track-start" ? LABELS.trackStart : stop.virtual === "track-end" ? LABELS.trackEnd : null;
+  return (virtualLabel ?? siteLabel(sites, stop.site)).th;
+}
+
+/**
+ * What a stop's map popup says, precomputed so the script does no date maths and
+ * the popup can never disagree with the table or the Viewing line. `past` is
+ * `runsPastDay` — the table's `*` rule, decided once, here.
+ */
+function stopTexts(report: DayReport, sites: readonly Site[]): { place: string; range: string; engine: string; past: boolean }[] {
+  return (report.stops ?? []).map((stop) => ({
+    place: stopPlace(stop, sites),
+    range: stopRange(stop),
+    engine: engineText(stop),
+    past: runsPastDay(stop),
+  }));
+}
+
+/**
+ * A stop's real range for the Viewing line: `29 ก.ย. 14:34 – 30 ก.ย. 13:08`, or
+ * `30 ก.ย. 13:21–13:46` when both ends fall on one date, or `… – ยังจอดอยู่`
+ * with no departure. A single-instant stop (a virtual book-end) is one time.
+ */
+function stopRange(stop: ReportStop): string {
+  const from = arrivalText(stop);
+  if (stop.spanDepartAt === null) return `${from} – ${LABELS.stillParked.th}`;
+  if (stop.spanDepartAt === stop.spanArriveAt) return from;
+  if (bangkokYmd(stop.spanArriveAt) === bangkokYmd(stop.spanDepartAt)) return `${from}–${hhmm(stop.spanDepartAt)}`;
+  return `${from} – ${dateTimeAt(stop.spanDepartAt)}`;
 }
 
 function deviceHtml(report: DayReport): string {
@@ -186,6 +283,9 @@ export function renderDayPage(args: DayPageArgs): string {
 
   const tripRows = report.trips ?? [];
   const stopRows = report.stops ?? [];
+  const views = mapViews(report, sites);
+  const dated = (heading: L): string =>
+    `<h2>${pairHtml(heading)} <span class="hdate">${escapeHtml(thaiLongDate(report.date))}</span></h2>`;
 
   const body = `<nav class="days">${nav}</nav>
 <section>
@@ -210,7 +310,7 @@ ${siteTiles}
 ${qualityHtml(report)}
 </section>
 <section>
-<h2>${pairHtml(LABELS.tripsHeading)}</h2>
+${dated(LABELS.tripsHeading)}
 ${
   tripRows.length === 0
     ? `<p class="none">${escapeHtml(pair(LABELS.noData))}</p>`
@@ -220,18 +320,21 @@ ${
 }
 </section>
 <section>
-<h2>${pairHtml(LABELS.stopsHeading)}</h2>
+${dated(LABELS.stopsHeading)}
 ${
   stopRows.length === 0
     ? `<p class="none">${escapeHtml(pair(LABELS.noData))}</p>`
     : `<div class="scroll"><table>
 <thead><tr><th>${escapeHtml(LABELS.colArrive.th)}</th><th>${escapeHtml(LABELS.colDepart.th)}</th><th class="num">${escapeHtml(LABELS.colMinutes.th)}</th><th>${escapeHtml(LABELS.colPlace.th)}</th><th class="num">${escapeHtml(LABELS.colEngineOn.th)}</th><th>${escapeHtml(LABELS.colEngineOffOn.th)}</th></tr></thead>
-<tbody>${stopRows.map((st, i) => stopRow(st, sites, i)).join("")}</tbody></table></div>`
+<tbody>${stopRows.map((st, i) => stopRow(st, sites, i)).join("")}</tbody></table></div>${
+        stopRows.some(runsPastDay) ? `\n<p class="footnote">${escapeHtml(pair(LABELS.minutesWithinDay))}</p>` : ""
+      }`
 }
 </section>
 <section>
-<h2>${pairHtml(LABELS.mapHeading)}</h2>
+${dated(LABELS.mapHeading)}
 ${chipsHtml(report, sites)}
+<p class="viewing" id="map-view">${pairHtml(LABELS.viewing)}: <span id="map-view-text">${escapeHtml(views.all!)}</span></p>
 <div id="map" data-ymd="${escapeHtml(report.date)}"></div>
 </section>`;
 
@@ -247,6 +350,8 @@ ${chipsHtml(report, sites)}
       stopParked: LABELS.stopParked.th,
       stopRunning: LABELS.stopRunning.th,
     },
+    views,
+    stopText: stopTexts(report, sites),
   };
 
   const bodyEnd = `
@@ -303,7 +408,7 @@ export const MAP_ESC_FN = `function esc(v) {
  * `history.replaceState` (never `pushState` — a filter click is not a new page),
  * and a hash present on load is applied once the fetch resolves.
  */
-const MAP_SCRIPT = `
+export const MAP_SCRIPT = `
 (function () {
   try {
     var el = document.getElementById('map');
@@ -313,6 +418,20 @@ const MAP_SCRIPT = `
     try { cfg = JSON.parse(dataEl.textContent || '{}'); } catch (e) { return; }
     var sites = cfg.sites || [];
     var txt = cfg.txt || {};
+    var views = cfg.views || {};
+    var stopText = cfg.stopText || [];
+    var viewEl = document.getElementById('map-view-text');
+
+    // The "Viewing" line: one precomputed string per selection key (no date
+    // maths here), set with textContent and never innerHTML. An unknown key
+    // shows the all-day text; a page without views leaves the server's text be.
+    function showView(key) {
+      try {
+        if (!viewEl) return;
+        var text = Object.prototype.hasOwnProperty.call(views, key) ? views[key] : views.all;
+        if (typeof text === 'string') viewEl.textContent = text;
+      } catch (e) { /* ignore */ }
+    }
 
     var map = L.map(el, { scrollWheelZoom: false });
     // OSM's tile usage policy requires a Referer: a tile requested without one
@@ -438,12 +557,23 @@ const MAP_SCRIPT = `
         // are any — a marker the owner tapped from the findings list must answer
         // "was anybody in the cab?" without sending him back to the table.
         var badge = st.engine === 'parked' ? txt.stopParked : st.engine === 'running' ? txt.stopRunning : '';
-        var times = st.engineOffAt ? esc(st.engineOffAt) + (st.engineOnAt ? ' \u2192 ' + esc(st.engineOnAt) : ' \u2192') : '';
-        marker.bindPopup(
-          '<b>' + esc(known ? st.site : txt.unknown) + '</b><br>' +
-          esc(st.arrive) + '–' + esc(st.depart) + ' (' + esc(st.minutes) + ' ' + esc(txt.minutes) + ')' +
-          (badge ? '<br>' + esc(badge) + (times ? ' ' + times : '') : '')
-        );
+        var text = stopText[j];
+        if (text) {
+          // The server's own words (the table's and the Viewing line's): a marker
+          // must not say 00:02–13:08 beside a row that says 29 ก.ย. 14:34.
+          marker.bindPopup(
+            '<b>' + esc(text.place) + '</b><br>' +
+            esc(text.range) + ' (' + esc(st.minutes) + (text.past ? '*' : '') + ' ' + esc(txt.minutes) + ')' +
+            (badge ? '<br>' + esc(badge) + (text.engine ? ' ' + esc(text.engine) : '') : '')
+          );
+        } else {
+          var times = st.engineOffAt ? esc(st.engineOffAt) + (st.engineOnAt ? ' \u2192 ' + esc(st.engineOnAt) : ' \u2192') : '';
+          marker.bindPopup(
+            '<b>' + esc(known ? st.site : txt.unknown) + '</b><br>' +
+            esc(st.arrive) + '–' + esc(st.depart) + ' (' + esc(st.minutes) + ' ' + esc(txt.minutes) + ')' +
+            (badge ? '<br>' + esc(badge) + (times ? ' ' + times : '') : '')
+          );
+        }
         stopMarkers.push(marker);
         stopCoords.push([st.lat, st.lon]);
       }
@@ -494,8 +624,8 @@ const MAP_SCRIPT = `
         marker.openPopup();
       }
 
-      /** Applies a token ('all' | 'trip-N[-M...]' | 'stop-N'); returns the canonical form applied. */
-      function applySelection(token) {
+      /** Applies a token ('all' | 'trip-N[-M...]' | 'stop-N') to the map; returns the canonical form applied. */
+      function applyToMap(token) {
         if (!token || token === 'all') { showAllTrips(); return 'all'; }
         var stopMatch = /^stop-(\\d+)$/.exec(token);
         if (stopMatch) { focusStop(parseInt(stopMatch[1], 10)); return token; }
@@ -513,6 +643,13 @@ const MAP_SCRIPT = `
         }
         showAllTrips();
         return 'all';
+      }
+
+      /** Map plus the Viewing line: every selection change, the hash applied on load included, comes through here. */
+      function applySelection(token) {
+        var applied = applyToMap(token);
+        showView(applied);
+        return applied;
       }
 
       function setHash(token) {
@@ -552,8 +689,9 @@ const MAP_SCRIPT = `
       }
 
       var initialToken = (window.location.hash || '').replace(/^#/, '');
-      if (initialToken) applySelection(initialToken);
-      else showAllTrips();
+      // An empty token is "all" (applyToMap says so), and goes through the same
+      // door so the Viewing line is set on every load, hash or none.
+      applySelection(initialToken);
 
       window.addEventListener('hashchange', function () {
         applySelection((window.location.hash || '').replace(/^#/, ''));
