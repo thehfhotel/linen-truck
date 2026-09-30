@@ -479,6 +479,10 @@ describe("stop spans on the day routes", () => {
     expect(first.spanArriveOpen).toBe(false);
     expect(first.spanDepartAt).toBe(first.departAt);
     expect(first.spanEngineOffAt).toBe(ARRIVE_29);
+    // The whole stop: 29 ก.ย. 14:34 to the last fix at 13:04 = 22 h 30 min. The day's own count stays in-day.
+    expect(first.spanMinutes).toBe(22 * 60 + 30);
+    expect(first.spanMinutes).toBeGreaterThan(first.minutes);
+    expect(first.spanEngineOnMin).toBe(0);
   });
 
   test("/api/day: the last row is still parked — spanDepartAt null, minutes as the day counted them", async () => {
@@ -490,6 +494,7 @@ describe("stop spans on the day routes", () => {
     expect(last.spanArriveAt).toBe(last.arriveAt);
     expect(last.spanDepartAt).toBeNull();
     expect(last.minutes).toBe(274);
+    expect(last.spanMinutes).toBe(274); // begun and still going within the day
   });
 
   test("every stop carries all five span fields, and the old fields are still there", async () => {
@@ -539,17 +544,19 @@ describe("stop spans on the day routes", () => {
     expect(first.spanArriveAt).toBe(first.arriveAt);
     expect(first.spanArriveOpen).toBe(false);
     expect(first.spanDepartAt).toBe(first.departAt);
+    expect(first.spanMinutes).toBe(first.minutes);
     const last = plain.stops![plain.stops!.length - 1]!;
     expect(last.spanDepartAt).toBe(last.departAt);
     const spanned = dayReport(seededSpans(), deps, YMD_30, { spans: true });
     expect(spanned.stops![0]!.spanArriveAt).toBe(ARRIVE_29);
   });
 
-  test("/day renders the true dates, the still-parked cell, the footnote and the heading dates", async () => {
+  test("/day renders the true dates, the still-parked cell, the whole duration and the heading dates", async () => {
     const html = await (await appNow(seededSpans()).handle(staffReq(`/day/${YMD_30}`))).text();
     expect(html).toContain(">29 ก.ย. 14:34</button>");
     expect(html).toContain('<td title="ยังจอดอยู่ · still parked">ยังจอดอยู่</td>');
-    expect(html).toContain("* นับเฉพาะเวลาในวันนี้ · * minutes within this day only");
+    expect(html).toContain('<td class="num">22 ชม. 30 น.</td>');
+    expect(html).not.toContain("นับเฉพาะเวลาในวันนี้");
     expect(html).toContain('<span class="hdate">30 ก.ย. 2026</span>');
     expect(html).toContain('<span id="map-view-text">ทั้งวัน · 30 ก.ย. 2026</span>');
   });

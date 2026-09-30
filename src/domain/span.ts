@@ -33,6 +33,15 @@ export interface StopSpan {
   departAt: number | null;
   engineOffAt: number | null;
   engineOnAt: number | null;
+  /**
+   * The last fix inside the stop — what the whole stop's duration is measured to.
+   * `departAt` says when the truck LEFT; this says when it was last SEEN there,
+   * so a stop with no departure (`departAt` null) still has a length: arrival to
+   * the latest fix.
+   */
+  lastFixAt: number;
+  /** Seconds of engine-on over the whole stop (`Stop.engineOnS` of the stop the span describes). */
+  engineOnS: number;
 }
 
 const defaultSpan = (s: Stop): StopSpan => ({
@@ -41,6 +50,8 @@ const defaultSpan = (s: Stop): StopSpan => ({
   departAt: s.depart,
   engineOffAt: s.engine.offAt,
   engineOnAt: s.engine.onAt,
+  lastFixAt: s.depart,
+  engineOnS: s.engineOnS,
 });
 
 /**
@@ -90,6 +101,7 @@ export function stopSpans(
       span.arriveAt = w.arrive;
       span.arriveOpen = w.arrive === windowStart;
       span.engineOffAt = w.engine.offAt;
+      span.engineOnS = w.engineOnS;
     }
   }
   if (lastIdx >= 0) {
@@ -98,6 +110,11 @@ export function stopSpans(
       const span = spans[lastIdx]!;
       span.departAt = w.depart === windowEnd ? null : w.depart;
       span.engineOnAt = w.engine.onAt;
+      span.lastFixAt = w.depart;
+      // Overwrites the first boundary's value when one stop is both: the two
+      // window stops agree unless a segmentation quirk splits them, and then the
+      // one holding the departing end is the better witness of the whole stop.
+      span.engineOnS = w.engineOnS;
     }
   }
   return spans;

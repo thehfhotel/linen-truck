@@ -355,6 +355,9 @@ describe("the span fields on every stop", () => {
       expect(stop.spanDepartAt).toBe(s.depart);
       expect(stop.spanEngineOffAt).toBe(s.engine.offAt);
       expect(stop.spanEngineOnAt).toBe(s.engine.onAt);
+      // Whole-stop durations, identity too: what the day counted, floored.
+      expect(stop.spanMinutes).toBe(stop.minutes);
+      expect(stop.spanEngineOnMin).toBe(stop.engineOnMin);
     });
   });
 
@@ -366,20 +369,40 @@ describe("the span fields on every stop", () => {
       departAt: null,
       engineOffAt: s.arrive - 3000,
       engineOnAt: null,
+      lastFixAt: s.depart + 7200,
+      engineOnS: s.engineOnS + 1234,
     }));
     const report = build(summary, { points: POINTS, spans });
+    const withoutSpan = (stop: object) => Object.fromEntries(Object.entries(stop).filter(([k]) => !k.startsWith("span")));
     report.stops!.forEach((stop, i) => {
       expect(stop.spanArriveAt).toBe(spans[i]!.arriveAt);
       expect(stop.spanArriveOpen).toBe(true);
       expect(stop.spanDepartAt).toBeNull();
       expect(stop.spanEngineOffAt).toBe(spans[i]!.engineOffAt);
       expect(stop.spanEngineOnAt).toBeNull();
-      const { spanArriveAt, spanArriveOpen, spanDepartAt, spanEngineOffAt, spanEngineOnAt, ...old } = stop;
-      const { spanArriveAt: _a, spanArriveOpen: _b, spanDepartAt: _c, spanEngineOffAt: _d, spanEngineOnAt: _e, ...oldPlain } =
-        plain.stops![i]!;
-      void [spanArriveAt, spanArriveOpen, spanDepartAt, spanEngineOffAt, spanEngineOnAt, _a, _b, _c, _d, _e];
-      expect(old).toEqual(oldPlain);
+      expect(withoutSpan(stop)).toEqual(withoutSpan(plain.stops![i]!));
     });
+  });
+
+  test("spanMinutes is the whole stop, floored: last fix minus real arrival", () => {
+    const s = summary.stops[1]!; // HF Ville, 12:24 to 13:34 on the day
+    const spans = summary.stops.map((x) => ({
+      arriveAt: x.arrive,
+      arriveOpen: false,
+      departAt: x.depart,
+      engineOffAt: x.engine.offAt,
+      engineOnAt: x.engine.onAt,
+      lastFixAt: x.depart,
+      engineOnS: x.engineOnS,
+    }));
+    spans[1] = { ...spans[1]!, arriveAt: s.depart - 1337 * 60, lastFixAt: s.depart + 59, engineOnS: 7319 };
+    const stop = build(summary, { points: POINTS, spans }).stops![1]!;
+    // 1337 min 59 s floors to 1337 minutes; 7319 s of engine is 121 minutes.
+    expect(stop.spanMinutes).toBe(1337);
+    expect(stop.spanEngineOnMin).toBe(121);
+    // The day's own numbers are untouched.
+    expect(stop.minutes).toBe(70);
+    expect(stop.engineOnMin).toBe(5);
   });
 
   test("summaryOnly still drops the stops, spans and all", () => {

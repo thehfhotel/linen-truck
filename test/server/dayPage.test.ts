@@ -35,6 +35,8 @@ function pageFor(ymd: string, points: Point[], tweak?: (spans: StopSpan[]) => vo
       departAt: s.depart,
       engineOffAt: s.engine.offAt,
       engineOnAt: s.engine.onAt,
+      lastFixAt: s.depart,
+      engineOnS: s.engineOnS,
     }));
     tweak(spans);
   }
@@ -228,7 +230,7 @@ describe("the stops table shows true, dated arrival and departure", () => {
   const T = (ymd: string, hhmm: string) => bkk(ymd, `${hhmm}:00`);
   const html = pageFor("2026-09-05", RAW_POINTS, (spans) => {
     // HF Ville really arrived the evening before, and the window starts inside it.
-    spans[1] = { ...spans[1]!, arriveAt: T("2026-09-04", "23:30"), arriveOpen: true };
+    spans[1] = { ...spans[1]!, arriveAt: T("2026-09-04", "23:30"), arriveOpen: true, engineOnS: 7260 };
     // The last HF Ville stop has no departure in the data: the truck is still there.
     spans[4] = { ...spans[4]!, departAt: null };
   });
@@ -252,28 +254,50 @@ describe("the stops table shows true, dated arrival and departure", () => {
     expect(stopRowHtml(html, 4)).toContain('<td title="ยังจอดอยู่ · still parked">ยังจอดอยู่</td>');
   });
 
-  test("minutes get * where the stop runs past the day, and only there", () => {
-    expect(stopRowHtml(html, 1)).toContain('<td class="num">70*</td>'); // arrival before the day
-    expect(stopRowHtml(html, 4)).toContain('<td class="num">44*</td>'); // still parked
-    expect(stopRowHtml(html, 2)).toContain('<td class="num">18</td>');
-    expect(stopRowHtml(html, 3)).toContain('<td class="num">4</td>');
+  test("the duration column is headed เวลาจอด, and only the stops table's", () => {
+    const stopsHead = html.slice(html.indexOf("<thead>", html.indexOf('<h2>จุดจอด')), html.indexOf("</thead>", html.indexOf('<h2>จุดจอด')));
+    expect(stopsHead).toContain('<th class="num">เวลาจอด</th>');
+    const tripsHead = html.slice(html.indexOf("<thead>"), html.indexOf("</thead>"));
+    expect(tripsHead).toContain('<th class="num">นาที</th>');
+    expect(tripsHead).not.toContain("เวลาจอด");
   });
 
-  test("a departure after the day's own also stars the minutes", () => {
+  test("a carried-in stop shows its WHOLE duration in hours, with ≥ because the arrival is only bounded", () => {
+    // 4 ก.ย. 23:30 to the last fix at 13:34:15 = 14 h 4 min, not the day's 70 minutes.
+    expect(stopRowHtml(html, 1)).toContain('<td class="num">≥ 14 ชม. 4 น.</td>');
+  });
+
+  test("a closed stop shows its duration without the prefix; hours and minutes read the way thaiDuration says", () => {
+    expect(stopRowHtml(plain, 1)).toContain('<td class="num">1 ชม. 10 น.</td>');
+    expect(stopRowHtml(html, 2)).toContain('<td class="num">18 น.</td>');
+    expect(stopRowHtml(html, 3)).toContain('<td class="num">4 น.</td>');
+    expect(stopRowHtml(html, 0)).toContain('<td class="num">0 น.</td>');
+  });
+
+  test("a still-parked stop counts to its latest fix", () => {
+    expect(stopRowHtml(html, 4)).toContain('<td class="num">44 น.</td>');
+  });
+
+  test("a departure after the day's own lengthens the duration to the last fix of the whole stop", () => {
     const later = pageFor("2026-09-05", RAW_POINTS, (spans) => {
-      spans[3] = { ...spans[3]!, departAt: T("2026-09-06", "01:00") };
+      spans[3] = { ...spans[3]!, departAt: T("2026-09-06", "01:00"), lastFixAt: T("2026-09-06", "01:00") };
     });
-    expect(stopRowHtml(later, 3)).toContain('<td class="num">4*</td>');
+    expect(stopRowHtml(later, 3)).toMatch(/<td class="num">10 ชม\. \d+ น\.<\/td>/);
     expect(stopRowHtml(later, 3)).toContain("<td>6 ก.ย. 01:00</td>");
   });
 
-  test("the footnote is rendered when any row is starred", () => {
-    expect(html).toContain("* นับเฉพาะเวลาในวันนี้ · * minutes within this day only");
+  test("no * and no footnote anywhere: the duration is the whole stop, so there is nothing to caveat", () => {
+    for (const page of [html, plain]) {
+      expect(page).not.toMatch(/<td class="num">[^<]*\*<\/td>/);
+      expect(page).not.toContain("นับเฉพาะเวลาในวันนี้");
+      expect(page).not.toContain("minutes within this day only");
+      expect(page).not.toContain('class="footnote"');
+    }
   });
 
-  test("no star, no footnote when every stop lies inside the day", () => {
-    expect(plain).not.toContain("* นับเฉพาะเวลาในวันนี้");
-    expect(plain).not.toMatch(/<td class="num">\d+\*<\/td>/);
+  test("the engine-on column reads the whole stop's engine time (spanEngineOnMin)", () => {
+    expect(stopRowHtml(html, 1)).toContain('<td class="num">121</td>'); // 7260 s
+    expect(stopRowHtml(plain, 1)).toContain('<td class="num">5</td>'); // the day's own 300 s
   });
 
   test("the engine off → on cell keeps its rules but reads the dated span values", () => {
@@ -548,7 +572,7 @@ describe("stopText in map-data", () => {
     spans[4] = { ...spans[4]!, departAt: null };
   });
   const data = mapDataOf(html) as unknown as {
-    stopText: { place: string; range: string; engine: string; past: boolean }[];
+    stopText: { place: string; range: string; engine: string; duration: string }[];
     views: Record<string, string>;
   };
 
@@ -566,12 +590,12 @@ describe("stopText in map-data", () => {
     expect(data.stopText[4]!.range).toBe("5 ก.ย. 14:26 – ยังจอดอยู่");
   });
 
-  test("past is the table's * rule, computed once on the server", () => {
-    expect(data.stopText.map((e) => e.past)).toEqual([false, true, false, false, true]);
-    // …and it agrees with the rows the table starred.
+  test("duration is exactly the table's duration cell, unescaped", () => {
+    expect(data.stopText.map((e) => e.duration)).toEqual(["0 น.", "≥ 14 ชม. 4 น.", "18 น.", "4 น.", "44 น."]);
     for (const [i, e] of data.stopText.entries()) {
-      expect(/<td class="num">\d+\*<\/td>/.test(stopRowHtml(html, i))).toBe(e.past);
+      expect(stopRowHtml(html, i)).toContain(`<td class="num">${e.duration}</td>`);
     }
+    for (const e of data.stopText) expect(e).not.toHaveProperty("past");
   });
 
   test("the engine text is plain, unescaped and dated; empty with no off event", () => {
@@ -589,28 +613,28 @@ describe("stopText in map-data", () => {
 describe("the stop popup, executed", () => {
   const apiStop = { site: "hfville", lat: 9.12, lon: 99.35, engine: "parked", engineOffAt: "00:04", engineOnAt: null, arrive: "00:04", depart: "13:04", minutes: 780 };
 
-  test("uses the precomputed span text: escaped, starred when past the day, then the badge and engine line", async () => {
+  test("uses the precomputed span text: escaped, the whole-stop duration, then the badge and engine line", async () => {
     const run = await runMapScript({
       hash: "",
       views: { all: "x" },
       selectKeys: [],
       stops: [apiStop],
-      stopText: [{ place: "HF <Ville>", range: "29 ก.ย. 14:34 – 30 ก.ย. 13:04", engine: "29 ก.ย. 14:34 →", past: true }],
+      stopText: [{ place: "HF <Ville>", range: "29 ก.ย. 14:34 – 30 ก.ย. 13:04", engine: "29 ก.ย. 14:34 →", duration: "22 ชม. 30 น." }],
     });
     expect(run.popups).toEqual([
-      "<b>HF &lt;Ville&gt;</b><br>29 ก.ย. 14:34 – 30 ก.ย. 13:04 (780* นาที)<br>จอด/ดับเครื่อง 29 ก.ย. 14:34 →",
+      "<b>HF &lt;Ville&gt;</b><br>29 ก.ย. 14:34 – 30 ก.ย. 13:04 (22 ชม. 30 น.)<br>จอด/ดับเครื่อง 29 ก.ย. 14:34 →",
     ]);
   });
 
-  test("no star when the stop lies inside the day, no engine text when there is none", async () => {
+  test("a bounded arrival shows its ≥, the duration is escaped, and there is no engine text when there is none", async () => {
     const run = await runMapScript({
       hash: "",
       views: { all: "x" },
       selectKeys: [],
       stops: [{ ...apiStop, engine: "running", engineOffAt: null }],
-      stopText: [{ place: "โรงแรม HF", range: "5 ก.ย. 13:48–14:06", engine: "", past: false }],
+      stopText: [{ place: "โรงแรม HF", range: "5 ก.ย. 13:48–14:06", engine: "", duration: "≥ 18 น.<" }],
     });
-    expect(run.popups).toEqual(["<b>โรงแรม HF</b><br>5 ก.ย. 13:48–14:06 (780 นาที)<br>จอด/เครื่องติด"]);
+    expect(run.popups).toEqual(["<b>โรงแรม HF</b><br>5 ก.ย. 13:48–14:06 (≥ 18 น.&lt;)<br>จอด/เครื่องติด"]);
   });
 
   test("an entry that is missing falls back to the old popup", async () => {

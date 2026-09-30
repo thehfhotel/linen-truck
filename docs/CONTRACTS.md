@@ -103,7 +103,8 @@ export function audit(ymd: string, seg: ReturnType<typeof segment>, points: Poin
 export function summarizeDay(ymd: string, points: Point[], sites: Site[], rules: Rules): DaySummary
 // src/domain/span.ts   (stop spans, 2026-09-30 — see rule 9)
 export const SPAN_WINDOW_DAYS = 7
-export interface StopSpan { arriveAt: number; arriveOpen: boolean; departAt: number | null; engineOffAt: number | null; engineOnAt: number | null }
+export interface StopSpan { arriveAt: number; arriveOpen: boolean; departAt: number | null; engineOffAt: number | null; engineOnAt: number | null;
+  lastFixAt: number; engineOnS: number }
 export function stopSpans(dayPoints: Point[], windowPoints: Point[], dayStops: Stop[], sites: Site[], rules: Rules): StopSpan[]   // same length and order as dayStops
 // src/domain/sinotrackRow.ts
 export function pointFromRow(row: Record<string, string>): Point | null  // raw platform row → Point (parses Voltages= from strOther)
@@ -199,7 +200,9 @@ Rules (proven in the Python prototype, 2026-09-05):
    window the report happened to load. Run `segment(windowPoints)` once and take the non-virtual window stop W with `W.arrive ≤ t ≤ W.depart` for the
    boundary fix `t`; no W keeps the default. First boundary: `arriveAt = W.arrive`, `arriveOpen = (W.arrive === windowPoints[0].t)` (the window began inside
    the stop, so the real arrival is at or before `arriveAt`), `engineOffAt = W.engine.offAt`. Last boundary: `departAt = W.depart`, or null when
-   `W.depart === windowPoints[last].t` (no departure in the data: still parked, or the data ends inside the stop), `engineOnAt = W.engine.onAt`.
+   `W.depart === windowPoints[last].t` (no departure in the data: still parked, or the data ends inside the stop), `engineOnAt = W.engine.onAt`,
+   `lastFixAt = W.depart` (the last fix inside the stop, even when `departAt` is null). Either boundary with a W also takes `engineOnS = W.engineOnS`.
+   Defaults (and virtual stops): `lastFixAt = s.depart`, `engineOnS = s.engineOnS`.
 Expected on the fixture (rules above, sites above): 82 points after cleaning; 5 stops — a `track-start` book-end, then
 hfville 12:24–13:34, hf 13:48–14:06, hfville 14:18–14:22 and hfville 14:26–15:11; 4 trips totalling 15.35 km; legs:
 [hfville→hf (trip 2, 4.76 km), hf→hfville (trip 3, 6.74 km), hfville→hfville (trip 4, 0.37 km), all viaUnknownStops 0];
@@ -279,9 +282,9 @@ a Leaflet map (CDN, integrity-pinned) drawing the day's path + site circles + st
 the engine times), fed by `/api/day/:ymd`.
 Since 2026-09-30 (stop spans, §3 rule 9): the stops table shows the TRUE arrival and departure WITH DATES on every row, `29 ก.ย. 14:34` (Bangkok, Thai
 short month), read from the `span*` fields — the arrive cell (still the row-select button) is prefixed `ก่อน ` when `spanArriveOpen`, and a stop with
-no departure in the data reads `ยังจอดอยู่` (`title` = `ยังจอดอยู่ · still parked`). The minutes column stays the day's own count, so the summary
-totals do not move; a row whose real extent runs past the day (`spanArriveAt < arriveAt`, or no departure, or `spanDepartAt > departAt`) gets a `*` on
-its minutes and the footnote `* นับเฉพาะเวลาในวันนี้ · * minutes within this day only` renders under the table (only when some row has one). The
+no departure in the data reads `ยังจอดอยู่` (`title` = `ยังจอดอยู่ · still parked`). The duration column, headed `เวลาจอด` (the trips table keeps its minutes header), is the WHOLE stop, arrival to the last fix inside it, as `thaiDuration` — `8 น.`, `1 ชม.`,
+`22 ชม. 17 น.`, hours and minutes and never days — prefixed `≥ ` when `spanArriveOpen` (the arrival is only bounded); there is no `*` and no footnote. The engine-on
+column shows the whole stop's `spanEngineOnMin`. The report's `minutes`, `engineOnMin`, the summary and time-at-site stay the day's own (owner decision: per day). The
 engine off → on cell keeps its rules (`—` with no off, `X →` with no on) with dated values. The Trips, Stops and Route headings each end with the
 viewed date in a muted `<span class="hdate">30 ก.ย. 2026</span>` (styled in the nonce'd style block, never a `style=` attribute). Under the
 map chips a line `กำลังดู · Viewing: …` (`<p class="viewing" id="map-view">`) names the date and time range of the current selection:
@@ -289,9 +292,9 @@ map chips a line `กำลังดู · Viewing: …` (`<p class="viewing" id
 30 ก.ย. 13:08` (`30 ก.ย. 13:21–13:46` when both ends share a date, `… – ยังจอดอยู่` while parked, `ก่อน ` before an open arrival). The server
 precomputes one string per rendered `data-select` key into the page's `map-data` JSON (`views: { [key]: string }`, always with `all`, which is also the
 no-JS initial text); the ES5 map script sets `textContent` from it on every selection change, the hash applied on load included, and falls back to
-`views.all` for an unknown key. The same `map-data` carries `stopText: [{ place, range, engine, past }]`, one entry per stop in table order — the place label, the Viewing
-line's range, the dated engine text (plain, unescaped, empty with no off event) and `past` (the `*` rule, decided once on the server) — and a stop
-marker's popup is built from it (`<b>place</b><br>range (minutes[*] นาที)` plus the badge and engine line), so the popup, the table and the Viewing line
+`views.all` for an unknown key. The same `map-data` carries `stopText: [{ place, range, engine, duration }]`, one entry per stop in table order — the place label, the Viewing
+line's range, the dated engine text (plain, unescaped, empty with no off event) and `duration` (exactly the table's duration cell, plain text) — and a stop
+marker's popup is built from it (`<b>place</b><br>range (duration)` plus the badge and engine line), so the popup, the table and the Viewing line
 never disagree; a missing entry falls back to the day-clipped popup.
 Week page: one row per day (date link, km, trips, round trips, first departure, last arrival, findings by kind, points).
 Labels live in `src/shared/labels.ts` as `{ th, en }` pairs (`L`), rendered as "ไทย · English".
@@ -325,10 +328,11 @@ finding carries `engine` and `engineOffMin`, and its `text` gains the status suf
 en `, engine running` / `, engine off`, and NO suffix when the kind is `unknown` (no voltage, no claim). `engineOnMin` is
 unchanged. hf-mcp reads `findingCount` generically and prints `text`, so nothing there needs a change. Day page selection is
 mirrored in the URL hash (`#all`, `#trip-N`, `#trip-N-M` for a detour leg, `#stop-I`) and applied on load.
-Additive since 2026-09-30 (stop spans, §3 rule 9): every stop carries five more fields, always present — `spanArriveAt` (epoch s, the real
+Additive since 2026-09-30 (stop spans, §3 rule 9): every stop carries seven more fields, always present — `spanArriveAt` (epoch s, the real
 arrival), `spanArriveOpen` (boolean: the data window began inside the stop, so the real arrival is at or before `spanArriveAt`), `spanDepartAt`
 (epoch s, or null when there is no departure in the data), `spanEngineOffAt` and `spanEngineOnAt` (epoch s or null — epochs, unlike the `HH:MM`
-`engineOffAt`/`engineOnAt`, so a consumer can date them). ONLY the stop that begins on the day's first fix and the stop that ends on its last fix can
+`engineOffAt`/`engineOnAt`, so a consumer can date them), `spanMinutes` (the WHOLE stop, `floor((last fix inside it − spanArriveAt) / 60)`; a still-parked stop
+counts to its latest fix) and `spanEngineOnMin` (engine-on minutes over the whole stop). Both are identity (`minutes`, `engineOnMin`) without spans. ONLY the stop that begins on the day's first fix and the stop that ends on its last fix can
 differ from the stop's own `arriveAt`/`departAt`/engine times; every other stop, and both virtual book-ends, carries them unchanged (`spanArriveOpen:
 false`). `arrive`, `depart`, `arriveAt`, `departAt`, `minutes`, the engine fields and the findings are exactly as before — `minutes` and the summary
 count only the day. `/api/day` and `/feed/daily` (and the page) fill the spans from a window of ±7 days; `/api/week` and `/feed/range` strip the stops, so

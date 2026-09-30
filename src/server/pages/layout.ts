@@ -139,7 +139,6 @@ ul.findings li button.rowlink { display: block; margin-top: 4px; font-size: 12px
 .hdate { color: var(--ink-muted); font-weight: 600; font-size: 12px; margin-left: 4px; white-space: nowrap; }
 .viewing { font-size: 13px; color: var(--ink-muted); margin: 0 0 8px; }
 .viewing #map-view-text { color: var(--ink); font-weight: 600; }
-.footnote { font-size: 12px; color: var(--ink-muted); margin: 6px 0 0; }
 `;
 
 export interface LayoutArgs {
