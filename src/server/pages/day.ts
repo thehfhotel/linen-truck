@@ -15,6 +15,7 @@ import type { Site } from "../../domain/types.ts";
 import { LABELS, pair, tripLabel, type L } from "../../shared/labels.ts";
 import { thaiDateTime, thaiDuration, thaiLongDate, thaiShortDate } from "../../shared/time.ts";
 import { bangkokStamp, hhmm, type DayReport, type ReportStop, type ReportTrip } from "../report.ts";
+import { SESSION_STYLE_VERSION } from "../tiles.ts";
 import { GOOGLE_LOGO_DATA_URI } from "./googleLogo.ts";
 import {
   escapeHtml,
@@ -481,7 +482,7 @@ const GOOGLE_BASEMAP_SNIPPET = `// GOOGLE MODE (docs/CONTRACTS.md §8, ADR 0002)
         if (note) note.removeAttribute('hidden');
       } catch (e) { /* ignore */ }
     }
-    var googleBase = L.tileLayer('/tiles/{z}/{x}/{y}', { maxZoom: 19, tileSize: 256 });
+    var googleBase = L.tileLayer('/tiles/{z}/{x}/{y}?v=${SESSION_STYLE_VERSION}', { maxZoom: 19, tileSize: 256 });
     googleBase.on('tileerror', showNote);
     googleBase.addTo(map);
 

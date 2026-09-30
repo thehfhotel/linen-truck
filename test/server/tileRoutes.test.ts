@@ -123,6 +123,20 @@ describe("GET /tiles/:z/:x/:y", () => {
     expect(s.tileCalls).toEqual([[12, 3200, 1900]]);
   });
 
+  test("a ?v= cache-busting query is ignored: it serves exactly like the bare path", async () => {
+    const s = stub();
+    const a = appWith(s);
+    const bare = await a.handle(staffReq("/tiles/12/3200/1900"));
+    const withV = await a.handle(staffReq("/tiles/12/3200/1900?v=abc"));
+    expect(withV.status).toBe(200);
+    expect(Array.from(new Uint8Array(await withV.arrayBuffer()))).toEqual(Array.from(new Uint8Array(await bare.arrayBuffer())));
+    expect(withV.headers.get("content-type")).toBe(bare.headers.get("content-type"));
+    expect(withV.headers.get("cache-control")).toBe(bare.headers.get("cache-control"));
+    expect(s.tileCalls).toEqual([[12, 3200, 1900], [12, 3200, 1900]]);
+    // a bad coordinate is still refused with a query attached
+    expect((await a.handle(staffReq("/tiles/3/8/0?v=abc"))).status).toBe(400);
+  });
+
   test("the corners of the valid range are accepted", async () => {
     const s = stub();
     const a = appWith(s);
