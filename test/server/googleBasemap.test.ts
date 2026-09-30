@@ -178,6 +178,13 @@ describe("Google mode", () => {
     expect(html).toContain('<style nonce="test-nonce">');
     expect(html).toContain(".gmaps-logo");
   });
+
+  test("the attribution width cap sits on the bottom-right corner, not the control", () => {
+    // A percentage max-width on the control resolves against the shrink-wrapped
+    // corner and squeezed the copyright into a ~48 px column on the live page.
+    expect(html).toContain(".leaflet-bottom.leaflet-right { max-width: calc(100% - 130px); }");
+    expect(html).not.toMatch(/\.leaflet-control-attribution\s*\{[^}]*max-width/);
+  });
 });
 
 const escapeText = escapeHtml;
