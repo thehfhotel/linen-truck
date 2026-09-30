@@ -154,6 +154,14 @@ export interface ReportStop {
   /** Epoch seconds, unlike `engineOffAt`/`engineOnAt` above, so a consumer can date them. */
   spanEngineOffAt: number | null;
   spanEngineOnAt: number | null;
+  /**
+   * The WHOLE stop's duration, arrival to the last fix inside it, floored like every
+   * duration (the stops table shows it, stop spans follow-up 2026-09-30). `minutes`
+   * above stays the day's own count, which is what the summary and time-at-site sum.
+   */
+  spanMinutes: number;
+  /** Minutes with the engine on over the whole stop; `engineOnMin` stays the day's own. */
+  spanEngineOnMin: number;
   /** Present only for the two synthetic day-edge stops (§3 rule 3). */
   virtual?: "track-start" | "track-end";
 }
@@ -278,6 +286,8 @@ function toStop(stop: Stop, span?: StopSpan): ReportStop {
     spanDepartAt: span ? span.departAt : stop.depart,
     spanEngineOffAt: span ? span.engineOffAt : stop.engine.offAt,
     spanEngineOnAt: span ? span.engineOnAt : stop.engine.onAt,
+    spanMinutes: minutesOf((span ? span.lastFixAt : stop.depart) - (span ? span.arriveAt : stop.arrive)),
+    spanEngineOnMin: minutesOf(span ? span.engineOnS : stop.engineOnS),
   };
   if (stop.virtual !== undefined) out.virtual = stop.virtual;
   return out;

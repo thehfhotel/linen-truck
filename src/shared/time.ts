@@ -147,3 +147,15 @@ export function thaiDateTime(iso: string): string {
   const stamp = bangkokDateTime(iso); // "YYYY-MM-DD HH:MM"
   return `${thaiShortDate(stamp.slice(0, 10))} ${stamp.slice(11)}`;
 }
+
+/**
+ * Minutes as `8 น.`, `1 ชม.`, `5 ชม. 16 น.` — hours and minutes, never days (a truck
+ * parked for two nights reads `50 ชม. 5 น.`). Whole, non-negative minutes in.
+ */
+export function thaiDuration(min: number): string {
+  const total = Math.max(0, Math.floor(min));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  if (h === 0) return `${m} น.`;
+  return m === 0 ? `${h} ชม.` : `${h} ชม. ${m} น.`;
+}

@@ -13,7 +13,7 @@
 import { bangkokYmd, isoAt } from "../../domain/clock.ts";
 import type { Site } from "../../domain/types.ts";
 import { LABELS, pair, tripLabel, type L } from "../../shared/labels.ts";
-import { thaiDateTime, thaiLongDate, thaiShortDate } from "../../shared/time.ts";
+import { thaiDateTime, thaiDuration, thaiLongDate, thaiShortDate } from "../../shared/time.ts";
 import { bangkokStamp, hhmm, type DayReport, type ReportStop, type ReportTrip } from "../report.ts";
 import {
   escapeHtml,
@@ -95,12 +95,13 @@ const engineTimes = (stop: ReportStop): string => {
 };
 
 /**
- * Does the stop's real extent reach outside what the day counted? Then its
- * `minutes` (which stays within the day, so the summary totals do not move) is
- * only part of the story and the cell says so with a `*`.
+ * The whole stop's duration as the table and the popup print it: hours and
+ * minutes, arrival to the last fix, with `≥ ` when the arrival is only bounded
+ * (the data window began inside the stop, so the truck was there at least this long).
+ * Unescaped; the table escapes it, and the map script escapes it for its popup.
  */
-const runsPastDay = (stop: ReportStop): boolean =>
-  stop.spanArriveAt < stop.arriveAt || stop.spanDepartAt === null || stop.spanDepartAt > stop.departAt;
+const durationText = (stop: ReportStop): string =>
+  `${stop.spanArriveOpen ? "≥ " : ""}${thaiDuration(stop.spanMinutes)}`;
 
 /** The arrival as the stops table prints it: dated, and `ก่อน` when the data only bounds it. */
 const arrivalText = (stop: ReportStop): string =>
@@ -117,9 +118,9 @@ function stopRow(stop: ReportStop, sites: readonly Site[], index: number): strin
   return `<tr data-stop="${index}"${stop.virtual ? ' class="virtual"' : ""}>
 <td><button type="button" class="rowlink" data-select="stop-${index}" title="${escapeHtml(pair(LABELS.showStopOnMap))}">${escapeHtml(arrivalText(stop))}</button></td>
 ${depart}
-<td class="num">${stop.minutes}${runsPastDay(stop) ? "*" : ""}</td>
+<td class="num">${escapeHtml(durationText(stop))}</td>
 <td><a href="${escapeHtml(stop.mapUrl)}" rel="noreferrer noopener" target="_blank">${escapeHtml(place.th)}</a>${engineBadge(stop)}</td>
-<td class="num">${stop.engineOnMin}</td>
+<td class="num">${stop.spanEngineOnMin}</td>
 <td>${engineTimes(stop)}</td>
 </tr>`;
 }
@@ -202,15 +203,15 @@ function stopPlace(stop: ReportStop, sites: readonly Site[]): string {
 
 /**
  * What a stop's map popup says, precomputed so the script does no date maths and
- * the popup can never disagree with the table or the Viewing line. `past` is
- * `runsPastDay` — the table's `*` rule, decided once, here.
+ * the popup can never disagree with the table or the Viewing line. `duration` is
+ * exactly the table's duration cell.
  */
-function stopTexts(report: DayReport, sites: readonly Site[]): { place: string; range: string; engine: string; past: boolean }[] {
+function stopTexts(report: DayReport, sites: readonly Site[]): { place: string; range: string; engine: string; duration: string }[] {
   return (report.stops ?? []).map((stop) => ({
     place: stopPlace(stop, sites),
     range: stopRange(stop),
     engine: engineText(stop),
-    past: runsPastDay(stop),
+    duration: durationText(stop),
   }));
 }
 
@@ -325,10 +326,8 @@ ${
   stopRows.length === 0
     ? `<p class="none">${escapeHtml(pair(LABELS.noData))}</p>`
     : `<div class="scroll"><table>
-<thead><tr><th>${escapeHtml(LABELS.colArrive.th)}</th><th>${escapeHtml(LABELS.colDepart.th)}</th><th class="num">${escapeHtml(LABELS.colMinutes.th)}</th><th>${escapeHtml(LABELS.colPlace.th)}</th><th class="num">${escapeHtml(LABELS.colEngineOn.th)}</th><th>${escapeHtml(LABELS.colEngineOffOn.th)}</th></tr></thead>
-<tbody>${stopRows.map((st, i) => stopRow(st, sites, i)).join("")}</tbody></table></div>${
-        stopRows.some(runsPastDay) ? `\n<p class="footnote">${escapeHtml(pair(LABELS.minutesWithinDay))}</p>` : ""
-      }`
+<thead><tr><th>${escapeHtml(LABELS.colArrive.th)}</th><th>${escapeHtml(LABELS.colDepart.th)}</th><th class="num">${escapeHtml(LABELS.colStopped.th)}</th><th>${escapeHtml(LABELS.colPlace.th)}</th><th class="num">${escapeHtml(LABELS.colEngineOn.th)}</th><th>${escapeHtml(LABELS.colEngineOffOn.th)}</th></tr></thead>
+<tbody>${stopRows.map((st, i) => stopRow(st, sites, i)).join("")}</tbody></table></div>`
 }
 </section>
 <section>
@@ -563,7 +562,7 @@ export const MAP_SCRIPT = `
           // must not say 00:02–13:08 beside a row that says 29 ก.ย. 14:34.
           marker.bindPopup(
             '<b>' + esc(text.place) + '</b><br>' +
-            esc(text.range) + ' (' + esc(st.minutes) + (text.past ? '*' : '') + ' ' + esc(txt.minutes) + ')' +
+            esc(text.range) + ' (' + esc(text.duration) + ')' +
             (badge ? '<br>' + esc(badge) + (text.engine ? ' ' + esc(text.engine) : '') : '')
           );
         } else {

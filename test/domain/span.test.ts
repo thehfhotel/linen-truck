@@ -40,6 +40,8 @@ const defaultSpan = (s: Stop): StopSpan => ({
   departAt: s.depart,
   engineOffAt: s.engine.offAt,
   engineOnAt: s.engine.onAt,
+  lastFixAt: s.depart,
+  engineOnS: s.engineOnS,
 });
 
 // HF Ville from 2026-09-29 14:34 to 2026-09-30 13:08, arrived by road, then a
@@ -78,6 +80,25 @@ describe("a stop carried over from the previous day", () => {
   test("the arrival fix reads engine-off, and the span carries that time", () => {
     expect(spans[0]!.engineOffAt).toBe(ARRIVE_29);
   });
+
+  test("lastFixAt is the stop's last fix — the day's own, since the stop ends inside the day", () => {
+    expect(spans[0]!.lastFixAt).toBe(LAST_OVERNIGHT);
+    expect(spans[0]!.lastFixAt).toBe(dayStops[0]!.depart);
+  });
+});
+
+describe("engine time of a carried-over stop comes from the whole stop", () => {
+  // The truck idles for seven minutes on arrival (13.8 V, settled), then switches off.
+  const idle = parked(ARRIVE_29, HFVILLE, 7, 60, { voltage: 13.8 });
+  const off = parked(ARRIVE_29 + 7 * 60, HFVILLE, 135, 600, { voltage: 12.7 });
+  const leaves = off[off.length - 1]!.t;
+  const { dayStops, spans } = scene(D30, [...driveIn(ARRIVE_29), ...idle, ...off, ...driveOut(leaves)]);
+
+  test("the day's clipped stop has no engine-on time; the span has the evening before's", () => {
+    expect(dayStops[0]!.engineOnS).toBe(0);
+    expect(spans[0]!.engineOnS).toBe(420);
+    expect(spans[0]!.arriveAt).toBe(ARRIVE_29);
+  });
 });
 
 describe("a stop running into the next day", () => {
@@ -111,6 +132,12 @@ describe("a stop running into the next day", () => {
     expect(spans[last]!.arriveOpen).toBe(false);
   });
 
+  test("lastFixAt and engineOnS are the whole stop's (14 minutes idling on the 30th)", () => {
+    expect(spans[last]!.lastFixAt).toBe(LAST_OVERNIGHT);
+    expect(dayStops[last]!.engineOnS).toBe(0);
+    expect(spans[last]!.engineOnS).toBe(14 * 60);
+  });
+
   test("the window really did reach past the day", () => {
     expect(windowPoints[windowPoints.length - 1]!.t).toBeGreaterThan(bkk(D30, "00:00:00"));
   });
@@ -124,6 +151,10 @@ describe("still parked at the window's last fix", () => {
     expect(dayStops).toHaveLength(1);
     expect(spans[0]!.departAt).toBeNull();
     expect(spans[0]!.arriveAt).toBe(ARRIVE_29);
+  });
+
+  test("lastFixAt is still the latest fix, although there is no departure", () => {
+    expect(spans[0]!.lastFixAt).toBe(ARRIVE_29 + 119 * 600);
   });
 });
 
@@ -218,6 +249,8 @@ describe("mid-day stops", () => {
 
   test("the middle one is untouched", () => {
     expect(spans[1]).toEqual(defaultSpan(dayStops[1]!));
+    expect(spans[1]!.lastFixAt).toBe(dayStops[1]!.depart);
+    expect(spans[1]!.engineOnS).toBe(dayStops[1]!.engineOnS);
   });
 
   test("the outer two are extended", () => {

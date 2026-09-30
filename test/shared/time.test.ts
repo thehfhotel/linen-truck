@@ -1,7 +1,7 @@
 // The Thai date helpers the day page's headings and stop rows read.
 
 import { describe, expect, test } from "bun:test";
-import { thaiDateTime, thaiLongDate, thaiShortDate } from "../../src/shared/time.ts";
+import { thaiDateTime, thaiDuration, thaiLongDate, thaiShortDate } from "../../src/shared/time.ts";
 
 describe("Thai dates (Gregorian year, matching the page header)", () => {
   test("short date has no zero padding", () => {
@@ -30,5 +30,20 @@ describe("Thai dates (Gregorian year, matching the page header)", () => {
     // 2026-09-29T17:34:00Z is 2026-09-30 00:34 in Bangkok.
     expect(thaiDateTime("2026-09-29T17:34:00.000Z")).toBe("30 ก.ย. 00:34");
     expect(thaiDateTime("2026-09-29T07:34:00.000Z")).toBe("29 ก.ย. 14:34");
+  });
+});
+
+describe("thaiDuration", () => {
+  test.each([
+    [0, "0 น."],
+    [8, "8 น."],
+    [25, "25 น."],
+    [59, "59 น."],
+    [60, "1 ชม."],
+    [316, "5 ชม. 16 น."],
+    [1337, "22 ชม. 17 น."],
+    [3005, "50 ชม. 5 น."], // no days unit
+  ])("%i min reads %s", (min, text) => {
+    expect(thaiDuration(min)).toBe(text);
   });
 });

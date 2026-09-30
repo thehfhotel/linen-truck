@@ -89,6 +89,8 @@ export const LABELS = {
   stopsHeading: { th: "จุดจอด", en: "Stops" },
   colArrive: { th: "ถึง", en: "Arrive" },
   colDepart: { th: "ออก", en: "Depart" },
+  /** The stops table's duration header — the whole stop, not minutes (the trips table keeps `colMinutes`). */
+  colStopped: { th: "เวลาจอด", en: "Stopped" },
   colPlace: { th: "สถานที่", en: "Place" },
   colEngineOn: { th: "ติดเครื่อง (นาที)", en: "Engine on (min)" },
   colEngineOffOn: { th: "ดับ → ติดเครื่อง", en: "Engine off → on" },
@@ -102,8 +104,6 @@ export const LABELS = {
   stillParked: { th: "ยังจอดอยู่", en: "still parked" },
   /** Prefix on an arrival the data only bounds: the truck was already there when the window began. */
   arrivedBefore: { th: "ก่อน", en: "before" },
-  /** The footnote under the stops table, for a `*` on a minutes cell. */
-  minutesWithinDay: { th: "* นับเฉพาะเวลาในวันนี้", en: "* minutes within this day only" },
 
   // ── map ───────────────────────────────────────────────────────────────────
   mapHeading: { th: "เส้นทาง", en: "Route" },
