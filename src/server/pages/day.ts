@@ -132,7 +132,7 @@ function findingsHtml(report: DayReport): string {
   if (report.findings.length === 0) return `<p class="none">${escapeHtml(pair(LABELS.noFindings))}</p>`;
   const items = report.findings.map((f) => {
     const mapLink =
-      f.kind === "unknown-stop"
+      f.kind === "unknown-stop" || f.kind === "tracker-power" || f.kind === "tracker-alarm"
         ? ` <a href="${escapeHtml(f.mapUrl)}" rel="noreferrer noopener" target="_blank">${escapeHtml(pair(LABELS.openInMaps))}</a>`
         : "";
     const selectAttr =

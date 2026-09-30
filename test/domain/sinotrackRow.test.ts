@@ -15,7 +15,22 @@ const ROW: Record<string, string> = {
 
 describe("pointFromRow", () => {
   it("should turn the platform's all-strings row into numbers", () => {
-    expect(pointFromRow(ROW)).toEqual({ t: 1788585074, lat: 9.1479117, lon: 99.3356417, speed: 18, voltage: 13.2 });
+    expect(pointFromRow(ROW)).toEqual({
+      t: 1788585074,
+      lat: 9.1479117,
+      lon: 99.3356417,
+      speed: 18,
+      voltage: 13.2,
+      alarm: null,
+      teState: null,
+    });
+  });
+
+  it("should parse the vendor's alarm and status words, high bit included, and keep them null when absent", () => {
+    const p = pointFromRow({ ...ROW, nAlarmState: "8", nTEState: String(0xe0644000) });
+    expect(p?.alarm).toBe(8);
+    expect(p?.teState).toBe(0xe0644000);
+    expect(pointFromRow({ ...ROW, nAlarmState: "", nTEState: "x" })).toMatchObject({ alarm: null, teState: null });
   });
 
   it("should leave voltage null when the fix carries none", () => {

@@ -61,19 +61,21 @@ Production values arrive through the deploy payload `.env` rendered by CI from r
 { "stopRadiusM": 120, "minStopS": 180, "mergeHopM": 300, "unknownStopMinS": 180,
   "movingKmh": 5, "schedule": { "start": "12:00", "end": "16:00" },
   "detourRatio": 1.25, "referenceKm": { "hf|hfville": 4.9 },
-  "engineOnVolts": 13.2, "engineHoldS": 300, "jitterRadiusM": 600, "gapS": 300 }
+  "engineOnVolts": 13.2, "engineHoldS": 300, "jitterRadiusM": 600, "gapS": 300, "unpluggedVolts": 10 }
 ```
 `referenceKm` keys are the two site ids sorted and joined with `|`. Owner tunes these files; no UI.
 `gapS` (2026-10-01, GPS gaps, §3 rule 10) is the seconds of silence between two consecutive fixes inside a trip beyond which the map draws the stretch as a dashed line. It is MAP ONLY: no other rule reads it. A `rules.json` written before it existed keeps 300 (like `engineHoldS` and `jitterRadiusM`).
+`unpluggedVolts` (2026-10-01, tracker power, §3 rule 11) is the supply voltage STRICTLY below which one fix reads "supply collapsed" (10.0 is not low, 9.9 is). It is one leg of the tracker-power finding and nothing else reads it. The lowest reading in 25 days of production data is 11.5 V and the trackers are specified from 9–10 V up. A `rules.json` written before it existed keeps 10.
 
 ## 3. Domain (`src/domain/`, pure, no IO, no Date.now, unit-tested against `test/fixtures/2026-09-05.raw.json`)
 ```ts
 // src/domain/types.ts
-export interface Point { t: number; lat: number; lon: number; speed: number; voltage: number | null } // t = epoch seconds
+export interface Point { t: number; lat: number; lon: number; speed: number; voltage: number | null;
+  alarm?: number | null; teState?: number | null } // t = epoch seconds; alarm = vendor nAlarmState, teState = vendor nTEState (§3 rule 11), optional, undefined reads as null
 export interface Site { id: string; name: { th: string; en: string }; lat: number; lon: number; radiusM: number }
 export interface Rules { stopRadiusM: number; minStopS: number; mergeHopM: number; unknownStopMinS: number; movingKmh: number;
   schedule: { start: string; end: string }; detourRatio: number; referenceKm: Record<string, number>; engineOnVolts: number;
-  engineHoldS: number; jitterRadiusM: number; gapS: number }
+  engineHoldS: number; jitterRadiusM: number; gapS: number; unpluggedVolts: number }
 export interface StopEngine { kind: 'parked' | 'running' | 'unknown'; offAt: number | null; onAt: number | null; offS: number }
 export interface Stop { arrive: number; depart: number; lat: number; lon: number; siteId: string | null;
   engineOnS: number; engine: StopEngine; virtual?: 'track-start' | 'track-end' }
@@ -85,6 +87,10 @@ export type Finding =
       engine: StopEngine['kind']; engineOffS: number }
   | { kind: 'detour'; leg: Leg; referenceKm: number; ratio: number }
   | { kind: 'outside-hours'; start: number; end: number; km: number }
+  | { kind: 'tracker-power'; start: number; end: number; reasons: PowerReason[]; minBatteryPct: number | null; minVoltage: number | null;
+      fixes: number; lat: number; lon: number }
+  | { kind: 'tracker-alarm'; start: number; end: number; code: number; fixes: number; lat: number; lon: number }
+export type PowerReason = 'battery' | 'power-cut' | 'on-battery' | 'shutdown' | 'low-supply'
 export interface DaySummary { ymd: string; pointCount: number; firstPointAt: number | null; lastPointAt: number | null;
   km: number; tripCount: number; roundTrips: number; firstDeparture: number | null; lastArrival: number | null;
   timeAtSiteS: Record<string, number>; stops: Stop[]; trips: Trip[]; legs: Leg[]; findings: Finding[]; gaps: Gap[] }
@@ -112,8 +118,12 @@ export const SPAN_WINDOW_DAYS = 7
 export interface StopSpan { arriveAt: number; arriveOpen: boolean; departAt: number | null; engineOffAt: number | null; engineOnAt: number | null;
   lastFixAt: number; engineOnS: number }
 export function stopSpans(dayPoints: Point[], windowPoints: Point[], dayStops: Stop[], sites: Site[], rules: Rules): StopSpan[]   // same length and order as dayStops
+// src/domain/power.ts   (tracker power, 2026-10-01 — see rule 11)
+export function fixReasons(p: Point, rules: Rules): PowerReason[]        // one fix's reasons, fixed order
+export function trackerPower(points: readonly Point[], rules: Rules): Extract<Finding, { kind: 'tracker-power' }>[]
+export function trackerAlarms(points: readonly Point[]): Extract<Finding, { kind: 'tracker-alarm' }>[]
 // src/domain/sinotrackRow.ts
-export function pointFromRow(row: Record<string, string>): Point | null  // raw platform row → Point (parses Voltages= from strOther)
+export function pointFromRow(row: Record<string, string>): Point | null  // raw platform row → Point (parses Voltages= from strOther, nAlarmState → alarm, nTEState → teState; null when absent)
 ```
 Rules (proven in the Python prototype, 2026-09-05):
 1. ENGINE STATE (`engineOnMask`): a point is ENGINE-ON iff some point of the day carries voltage ≥ `engineOnVolts`
@@ -221,10 +231,37 @@ Rules (proven in the Python prototype, 2026-09-05):
    ON THE FIXTURE there is NO gap at `gapS` 300: the longest silence inside any of its four trips is 271 s (14:22:15 → 14:26:46, trip 4) and 270 s (12:11:44 →
    12:16:14, trip 1), checked by hand against the raw `nTime` column. The 480-511 s hops of the parked runs (12:28 → 12:36, 13:07 → 13:15, 14:54 → 15:02 …) all sit
    inside stops and never count. `gapS` 200 would flag exactly those two (trip 1, 270 s; trip 4, 271 s) and nothing from the stops.
+11. TRACKER POWER (`trackerPower`, `trackerAlarms`, owner decision 2026-09-30, REPORT FINDING ONLY — no push of any kind): the owner wants a finding when the truck's
+   GPS tracker is possibly unplugged. Nobody has ever observed an unplug, so the rule is an OR of independent signals from `docs/research/tracker-unplug-voltage.md`
+   (its signal table A–E and its `nAlarmState` / `nTEState` decode tables, both read from the vendor's own web client). **It is NOT yet checked against a real unplug;
+   tune it after the first real event** (the research note's owner-run reversible test — fuse pulled for 30–60 minutes, every row's `strOther`, `nTEState`, `nAlarmState`
+   recorded — would settle which signals to keep). `Point.alarm` / `Point.teState` carry the vendor's `nAlarmState` / `nTEState`; `pointFromRow` parses both and the database
+   loader (`pointsBetween`, hence `pointsForDay` and the span window) selects `alarm_state` / `te_state`.
+   BIT MATH: `nTEState` uses bit 31, and JS `&` is a SIGNED 32-bit operator, so every read is unsigned (`te >>> 0`, `(te >>> 16) & 0xff`, single bits tested with `!== 0`); a word
+   like 0xE0644000 reads the same however it is spelled.
+   Per fix, its REASONS, in this fixed order: `battery` — `teState` non-null, bit 3 (0x8, "send stored data") CLEAR and the battery byte `(teState >>> 16) & 0xFF` in 1..99 (0 =
+   unknown, 100 = full: neither is ever a reason; a stored row carries the cell reading from when it was recorded, hours ago); `power-cut` — `alarm` non-null and `alarm & 8`
+   ("Main power cut off alarm"); `on-battery` — `teState` bit 29 (0x20000000, "Battery power"); `shutdown` — `teState` bit 30 (0x40000000, "Shutdown"); `low-supply` — `voltage`
+   non-null and `voltage < rules.unpluggedVolts` (strictly less; a null voltage is never low). Bit 31 "Sleep" is NOT a reason: it is a normal parked mode.
+   A fix is FLAGGED (at least one reason), NEUTRAL (no reason AND a store-and-forward row, `teState` bit 3 set — it says nothing about the present) or CLEAR (no reason otherwise,
+   a null `teState` included). A `tracker-power` run starts at a flagged fix, extends over flagged and neutral fixes and ends before the first CLEAR fix; a run's `end` is its LAST
+   FLAGGED fix (a trailing neutral row does not move it) and a neutral row never starts one. One finding per run: `{ start, end, reasons (union over the run, fixed order),
+   minBatteryPct (min battery byte over the run's `battery` fixes, else null), minVoltage (min voltage over its `low-supply` fixes, else null), fixes (FLAGGED fixes), lat, lon (the
+   first flagged fix) }`.
+   `tracker-alarm`: `code = alarm & ~8` (unsigned; the power-cut bit is already `power-cut` above). Maximal runs of consecutive fixes with the same NON-ZERO `code`; a fix with a
+   null `alarm` is neutral (it neither extends a run of another code nor ends one) and a fix with a different code, 0 included, ends it. One finding per run:
+   `{ start, end, code, fixes, lat, lon }`, `end` the last fix that carried the code.
+   Both are appended to the day's findings AHEAD of every other kind (they are the most urgent), `tracker-power` runs first, then `tracker-alarm` runs, then the existing kinds in
+   their existing order. It changes NO number of rules 1-10: km, trips, stops, legs, `timeAtSiteS`, gaps and the three older findings are exactly what they were, and both kinds
+   read the day's cleaned points (`cleanPoints`, so a null-island fix or a duplicate second is not seen). Voltage is still never read as engine state here.
+   ON THE FIXTURE both counts are ZERO: its 84 raw rows (82 after cleaning) carry `nAlarmState` `0` on every row and `nTEState` only `6569992` (0x644008 — 100 % battery, plus the
+   stored-data bit; 30 rows), `6569984` (0x644000 — 100 %, live; 53 rows) and `8` (a stored row with no context; 1 row), and every voltage is 12.2 V or above, so every fix is clear
+   or neutral. The same holds on the whole production archive (5,878 fixes to 2026-09-30): alarm 0 everywhere, battery byte 100 on all 5,825 rows that carry it and 0 on the 53
+   rows whose `teState` is exactly 0x8, voltage never below 11 V. The alarm decode (report layer, §9) is the vendor client's own table.
 Expected on the fixture (rules above, sites above): 82 points after cleaning; 5 stops — a `track-start` book-end, then
 hfville 12:24–13:34, hf 13:48–14:06, hfville 14:18–14:22 and hfville 14:26–15:11; 4 trips totalling 15.35 km; legs:
 [hfville→hf (trip 2, 4.76 km), hf→hfville (trip 3, 6.74 km), hfville→hfville (trip 4, 0.37 km), all viaUnknownStops 0];
-findings = 1 × detour (leg hf→hfville, ratio ≈ 1.38), 0 × unknown-stop — the 14:18–14:22 stop sits 368 m from the HF Ville
+findings = 1 × detour (leg hf→hfville, ratio ≈ 1.38), 0 × tracker-power, 0 × tracker-alarm (rule 11), 0 × unknown-stop — the 14:18–14:22 stop sits 368 m from the HF Ville
 centre, inside the 600 m fence, and its 381 m hop to the 14:26 stop is ≥ `mergeHopM`, so the two stay separate — and
 0 × outside-hours. Trip 1 (unlabelled start → hfville, 3.48 km) forms no leg. `roundTrips` 1, `timeAtSiteS`
 { hfville 7110, hf 1080 }. The morning stop ends at 13:34:15, the last fix before the truck reports movement: the
@@ -324,7 +361,7 @@ Invalid ymd → 400 JSON `{error:'bad-date'}`. Unknown route → 404.
 ## 8. Pages (server-rendered HTML strings in `src/server/pages/*.ts`, no framework, Thai primary with English secondary text)
 Day page: header (date, prev/next day, week link), device line (last seen, voltage, moving/parked), summary tiles
 (km, trips, round trips HF↔HF Ville, first departure, last arrival, time at HF, time at HF Ville), **findings** list first
-(unknown stops with Google Maps link + duration; detours with leg, km vs reference; outside-hours ranges), trips table
+(tracker-power and tracker-alarm findings first since 2026-10-01 — §3 rule 11 — each with a Google Maps link to its first flagged fix and a red left border like a detour, styled by a class in the nonce'd style block, never a `style=` attribute; then unknown stops with Google Maps link + duration; detours with leg, km vs reference; outside-hours ranges), trips table
 (n, start→end, minutes, km, max km/h, from → to), stops table (arrive–depart, minutes, site or map link + the engine badge `จอด/ดับเครื่อง` / `จอด/เครื่องติด` — none when the
 engine state is unknown, engine-on minutes, engine off → on times `12:27 → 13:32` / `12:27 →` / `—`),
 a Leaflet map (CDN, integrity-pinned) drawing the day's path + site circles + stop markers (a stop popup repeats the badge and
@@ -359,7 +396,7 @@ separate 2-point polyline spans the hole, and the solid line resumes at the seco
 (`LABELS.gapStraightLine`, passed through `map-data` `txt.gapStraight`), everything through the script's `esc`. When the report has at least one gap a server-rendered legend line sits under the map — `<p class="gaplegend">`, a short dashed swatch
 + `ไม่มีสัญญาณ GPS (ลากเส้นตรง) · No GPS data (straight line)` (`LABELS.gapLegend`) — styled by a class in the nonce'd style block, never a `style=` attribute; with no gap there is no legend. Like the rest of the script every failure is silent: a
 gap that cannot be drawn (a missing `gaps`, a malformed entry) never stops the trip, the stops or the report from drawing.
-Week page: one row per day (date link, km, trips, round trips, first departure, last arrival, findings by kind, points).
+Week page: one row per day (date link, km, trips, round trips, first departure, last arrival, findings by kind — `อาจถูกถอดปลั๊ก N` and `แจ้งเตือนจากเครื่อง N` first when present, points).
 Labels live in `src/shared/labels.ts` as `{ th, en }` pairs (`L`), rendered as "ไทย · English".
 Branding: HF One staff burgundy like feedback's /staff (not the crimson guest palette). Mobile-first, works on a phone.
 
@@ -368,7 +405,7 @@ Branding: HF One staff burgundy like feedback's /staff (not the crimson guest pa
 { "date": "2026-09-05", "tz": "Asia/Bangkok", "generatedAt": 1788600000,
   "device": { "teid": "1000000001", "lastSeenAt": 1788595367, "voltage": 12.7, "moving": false, "online": true },
   "summary": { "km": 15.4, "tripCount": 4, "roundTrips": 1, "firstDeparture": "12:11", "lastArrival": "14:26",
-               "timeAtSiteMin": { "hf": 18, "hfville": 118 }, "pointCount": 82, "findingCount": { "unknown-stop": 0, "detour": 1, "outside-hours": 0 } },
+               "timeAtSiteMin": { "hf": 18, "hfville": 118 }, "pointCount": 82, "findingCount": { "unknown-stop": 0, "detour": 1, "outside-hours": 0, "tracker-power": 0, "tracker-alarm": 0 } },
   "trips": [ { "n": 1, "start": "12:11", "end": "12:24", "minutes": 13, "km": 3.5, "maxKmh": 44, "from": null, "to": "hfville",
                "fromMapUrl": "…", "toMapUrl": "…" } ],
   "stops": [ { "arrive": "12:24", "depart": "13:34", "minutes": 70, "site": "hfville", "lat": 9.12223, "lon": 99.35179, "mapUrl": "…", "engineOnMin": 5,
@@ -383,7 +420,7 @@ Branding: HF One staff burgundy like feedback's /staff (not the crimson guest pa
   "path": [ [9.14791, 99.33564, 1788585074], … ],
   "dataQuality": { "lastPollAt": 1788599000, "lastPollOk": true, "note": null } }
 ```
-The three finding entries above are a SHAPE catalogue: the 2026-09-05 fixture itself raises only the detour (see §3).
+The three finding entries above (plus the two tracker findings below) are a SHAPE catalogue: the 2026-09-05 fixture itself raises only the detour (see §3).
 `/api/week` and `/feed/range` return the same objects without `trips`, `stops`, `legs`, `gaps`, `path` (findings kept).
 Additive since 2026-09-05 (map filtering): trips also carry `startAt`/`endAt` (epoch s), stops `arriveAt`/`departAt`,
 unknown-stop findings `stopIndex` (index into `stops`), outside-hours findings `startAt`/`endAt`.
@@ -406,6 +443,9 @@ Additive since 2026-10-01 (GPS gaps, §3 rule 10): `gaps: [{ trip, from, to, fro
 in the same order — `trip` the trip's `n`, `from`/`to` Bangkok `HH:MM` of the last fix before and the first fix after the silence, `fromAt`/`toAt` those two fixes' epoch seconds (what the day-page map matches on: they are consecutive
 entries of `path`), `minutes` floored like every duration, `km` the straight line across the hole to 1 dp (report-layer rounding only), and `text.th` `ไม่มีสัญญาณ GPS 10 นาที (14:32–14:43)` (under an hour `N นาที`, from an hour up `thaiDuration`, so 395 min reads `6 ชม. 35 น.`)
 with `text.en` `No GPS data for 10 min (14:32–14:43)` (always plain minutes). It is not a finding: `findings`, `findingCount`, `summary`, `trips`, `stops` and `legs` are exactly as before. `/api/week` and `/feed/range` strip `gaps` as they strip `path`.
+Additive since 2026-10-01 (tracker power, §3 rule 11): `findingCount` gains `"tracker-power"` and `"tracker-alarm"`, ALWAYS present (0 when none), and `findings` may carry two more kinds, listed AHEAD of the older ones. hf-mcp sums every `findingCount` value and prints `text.th` verbatim, so nothing there needs a change. No push exists for either: they are report findings only.
+`{ "kind": "tracker-power", "text": { "th": "เครื่องติดตามอาจถูกถอดปลั๊ก 14:02–14:20 (ใช้แบตสำรอง เหลือ 80%)", "en": "Tracker possibly unplugged 14:02–14:20 (on its backup battery, 80% left)" }, "start": "14:02", "end": "14:20", "startAt": 1790233320, "endAt": 1790234400, "reasons": ["battery"], "minBatteryPct": 80, "minVoltage": null, "fixes": 3, "mapUrl": "…" }` — `reasons` a subset of `battery | power-cut | on-battery | shutdown | low-supply` in that order; the `text` parenthesis joins one clause per reason with `, `: battery th `ใช้แบตสำรอง เหลือ 80%` / en `on its backup battery, 80% left` (`minBatteryPct`), power-cut `แจ้งเตือนไฟหลักถูกตัด` / `main power cut alarm`, on-battery `สถานะใช้แบตเตอรี่` / `battery-power status`, shutdown `สถานะปิดเครื่อง` / `shutdown status`, low-supply `ไฟเลี้ยงต่ำ 3.9 V` / `supply collapsed to 3.9 V` (`minVoltage`, 1 dp). `start`/`end` Bangkok `HH:MM` of the run's first and last FLAGGED fix, `startAt`/`endAt` their epoch seconds, `fixes` the flagged fixes, `mapUrl` the first flagged fix.
+`{ "kind": "tracker-alarm", "text": { "th": "เครื่องติดตามแจ้งเตือน: ชน, ขับเร็วเกิน (14:02–14:20)", "en": "Tracker alarm: Bump, Over speed (14:02–14:20)" }, "start": "14:02", "end": "14:20", "startAt": …, "endAt": …, "code": 65, "labels": [ { "th": "ชน", "en": "Bump" }, { "th": "ขับเร็วเกิน", "en": "Over speed" } ], "fixes": 2, "mapUrl": "…" }` — `code` is `nAlarmState` without the power-cut bit; `labels` decodes each set bit, lowest first, with the vendor web client's own table: 1 ชน/Bump, 2 ตัดวงจร/Cut off circuit, 4 ตัดน้ำมัน/Fuel cut off, 16 ออกนอกเขต/Out of fence, 32 เข้าเขต/Into fence, 64 ขับเร็วเกิน/Over speed, 128 ขอความช่วยเหลือ (SOS)/SOS, 16384 and 134217728 โจรกรรม/Steal (printed once when both are set), 32768 แรงดันไฟต่ำ/Low voltage, 131072 สั่นสะเทือน/Shock, and any other set bit `รหัส 0x…`/`code 0x…` with that bit's hex value. Like every other finding sentence a single-fix run keeps its range (`14:02–14:02`). `/api/week` and `/feed/range` keep both kinds (findings are kept), and `summary.findingCount` counts them.
 Rounding happens only in the report layer: km to 1 dp, ratio to 2 dp of the unrounded quotient, minutes floored.
 
 ## 10. Scripts (rev 2)

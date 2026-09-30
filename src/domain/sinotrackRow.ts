@@ -43,5 +43,14 @@ export function pointFromRow(row: Record<string, string>): Point | null {
   const lat = num(row.dbLat);
   const lon = num(row.dbLon);
   if (t === null || lat === null || lon === null) return null;
-  return { t, lat, lon, speed: num(row.nSpeed) ?? 0, voltage: parseVoltage(row.strOther) };
+  return {
+    t,
+    lat,
+    lon,
+    speed: num(row.nSpeed) ?? 0,
+    voltage: parseVoltage(row.strOther),
+    // The vendor's own status words (§3 rule 11); null when the row omits them.
+    alarm: num(row.nAlarmState),
+    teState: num(row.nTEState),
+  };
 }

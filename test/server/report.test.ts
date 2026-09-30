@@ -107,7 +107,7 @@ describe("buildDayReport", () => {
     expect(report.date).toBe("2026-09-01");
     expect(report.tz).toBe("Asia/Bangkok");
     expect(report.generatedAt).toBe(GENERATED_AT);
-    expect(report.summary.findingCount).toEqual({ "unknown-stop": 0, detour: 0, "outside-hours": 0 });
+    expect(report.summary.findingCount).toEqual({ "unknown-stop": 0, detour: 0, "outside-hours": 0, "tracker-power": 0, "tracker-alarm": 0 });
     expect(report.device).toEqual({ teid: TEID, lastSeenAt: null, voltage: null, moving: false, online: false });
     expect(report.trips).toEqual([]);
     expect(report.path).toEqual([]);
@@ -246,7 +246,7 @@ describe("the day-page filter fields (additive, §9)", () => {
 
   test("the fixture's own findings are one detour and nothing else", () => {
     expect(report.findings.map((f) => f.kind)).toEqual(["detour"]);
-    expect(report.summary.findingCount).toEqual({ "unknown-stop": 0, detour: 1, "outside-hours": 0 });
+    expect(report.summary.findingCount).toEqual({ "unknown-stop": 0, detour: 1, "outside-hours": 0, "tracker-power": 0, "tracker-alarm": 0 });
   });
 
   test("an outside-hours finding carries startAt/endAt", () => {

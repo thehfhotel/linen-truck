@@ -20,15 +20,18 @@
 // summarises.
 
 import type { Gap } from "../domain/gaps.ts";
-import type { DaySummary, Finding, Leg, Point, Rules, Site, Stop, Trip } from "../domain/types.ts";
+import type { DaySummary, Finding, Leg, Point, PowerReason, Rules, Site, Stop, Trip } from "../domain/types.ts";
 import { mapUrl } from "../domain/geo.ts";
 import { cleanPoints } from "../domain/segment.ts";
 import type { StopSpan } from "../domain/span.ts";
 import { thaiDuration } from "../shared/time.ts";
 import {
+  alarmLabels,
   detourText,
   gapText,
   outsideHoursText,
+  trackerAlarmText,
+  trackerPowerText,
   unknownStopText,
   type FindingKind,
   type L,
@@ -212,6 +215,36 @@ export type ReportFinding =
       /** Epoch seconds, additive (§9). */
       startAt: number;
       endAt: number;
+    }
+  | {
+      /** The tracker may have lost its supply (§3 rule 11), additive to §9 (2026-10-01). */
+      kind: "tracker-power";
+      text: L;
+      start: string;
+      end: string;
+      startAt: number;
+      endAt: number;
+      reasons: PowerReason[];
+      minBatteryPct: number | null;
+      minVoltage: number | null;
+      fixes: number;
+      /** The run's first flagged fix. */
+      mapUrl: string;
+    }
+  | {
+      /** The tracker itself raised an alarm (§3 rule 11), additive to §9 (2026-10-01). */
+      kind: "tracker-alarm";
+      text: L;
+      start: string;
+      end: string;
+      startAt: number;
+      endAt: number;
+      /** `nAlarmState` without the power-cut bit. */
+      code: number;
+      /** One entry per set bit of `code`, lowest first. */
+      labels: L[];
+      fixes: number;
+      mapUrl: string;
     };
 
 /**
@@ -265,7 +298,13 @@ export interface DayReport {
 
 // ── the builder ─────────────────────────────────────────────────────────────
 
-const EMPTY_COUNTS: Record<FindingKind, number> = { "unknown-stop": 0, detour: 0, "outside-hours": 0 };
+const EMPTY_COUNTS: Record<FindingKind, number> = {
+  "unknown-stop": 0,
+  detour: 0,
+  "outside-hours": 0,
+  "tracker-power": 0,
+  "tracker-alarm": 0,
+};
 
 /** The reference key for a pair of sites: the two ids sorted, joined with `|` (§2). */
 export const referenceKey = (a: string, b: string): string => [a, b].sort().join("|");
@@ -397,6 +436,40 @@ function toFinding(finding: Finding, sites: readonly Site[], stops: readonly Sto
       km,
       referenceKm: reference,
       ratio,
+    };
+  }
+  if (finding.kind === "tracker-power") {
+    const start = hhmm(finding.start);
+    const end = hhmm(finding.end);
+    return {
+      kind: "tracker-power",
+      text: trackerPowerText(start, end, finding.reasons, finding.minBatteryPct, finding.minVoltage),
+      start,
+      end,
+      startAt: finding.start,
+      endAt: finding.end,
+      reasons: [...finding.reasons],
+      minBatteryPct: finding.minBatteryPct,
+      minVoltage: finding.minVoltage,
+      fixes: finding.fixes,
+      mapUrl: mapUrl(finding.lat, finding.lon),
+    };
+  }
+  if (finding.kind === "tracker-alarm") {
+    const start = hhmm(finding.start);
+    const end = hhmm(finding.end);
+    const labels = alarmLabels(finding.code);
+    return {
+      kind: "tracker-alarm",
+      text: trackerAlarmText(labels, start, end),
+      start,
+      end,
+      startAt: finding.start,
+      endAt: finding.end,
+      code: finding.code,
+      labels,
+      fixes: finding.fixes,
+      mapUrl: mapUrl(finding.lat, finding.lon),
     };
   }
   const start = hhmm(finding.start);
