@@ -280,14 +280,18 @@ export interface DayPageArgs {
  * The logo's clear space is Google's: 10 px left (Leaflet's own control margin),
  * 10 px right and top (padding here), and 10 px below (Leaflet's margin, more than
  * the 5 px asked for). The attribution is held to the width the logo leaves it, so
- * on a phone the two wrap rather than overlap.
+ * on a phone the two wrap rather than overlap. The cap sits on the bottom-right
+ * CORNER, not on the attribution control: the corner is absolutely positioned in
+ * the map, so its percentage resolves against the map's width, whereas the
+ * control's resolved against the shrink-wrapped corner and squeezed the copyright
+ * into a ~48 px column (seen live 2026-09-30).
  */
 const GOOGLE_STYLE = `
 [hidden] { display: none !important; }
 .note { margin: 0 0 8px; padding: 8px 10px; border-left: 4px solid var(--warn); background: var(--tint); border-radius: 0 8px 8px 0; font-size: 13px; }
 .gmaps-logo { padding: 10px 10px 0 0; }
 .gmaps-logo img { display: block; height: 18px; width: auto; }
-.leaflet-control-attribution { max-width: calc(100% - 120px); }
+.leaflet-bottom.leaflet-right { max-width: calc(100% - 130px); }
 .mapfoot { margin: 16px 0 0; font-size: 12px; color: var(--ink-muted); }
 `;
 
