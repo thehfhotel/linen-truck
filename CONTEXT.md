@@ -92,7 +92,7 @@ shipped, so the scaffolding was rewritten rather than migrated:
 
 ## Stack and hosting (ADR 0001)
 
-Bun 1.3 + Elysia + `bun:sqlite`, one container `truck` on the HF Ville box,
+Bun 1.4 + Elysia + `bun:sqlite`, one container `truck` on the HF Ville box,
 host port **4100**, hostname **truck.thehfhotel.org** on that box's tunnel
 (as code in `hf-erp/infra/cloudflare/truck-ville.ts`, not `hostnames.json` —
 it is a foreign tunnel and the generic apply would wipe it). No build step —

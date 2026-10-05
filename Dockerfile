@@ -7,7 +7,7 @@
 #
 # Runs on the HF Ville box as the container `truck` (docs/CONTRACTS.md §0/§11).
 # ────────────────────────────────────────────────────────────────────────────
-FROM oven/bun:1.3-alpine
+FROM oven/bun:1.4.2-alpine
 
 # The pushed commit, baked in by CI (build-arg GIT_SHA). /healthz echoes it
 # verbatim and scripts/verify-live.sh compares it to the sha that was built —
