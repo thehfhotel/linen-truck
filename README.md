@@ -9,7 +9,7 @@ dispatch surface and nothing driver-facing.
 - **Live at** `https://truck.thehfhotel.org`, behind Cloudflare Access — the
   whole hostname is gated, there is no public page.
 - **Runs on** the HF Ville box, one container (`truck`) on port 4100.
-- **Stack** Bun 1.3 + Elysia + `bun:sqlite`. One dependency, no build step.
+- **Stack** Bun 1.4 + Elysia + `bun:sqlite`. One dependency, no build step.
 
 ## Running it locally
 
