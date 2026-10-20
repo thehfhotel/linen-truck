@@ -15,6 +15,10 @@ name: CI & Deploy
 #   * no `pull_request_target`, and the deploy job never runs on `pull_request`,
 #     so a fork PR can never reach a secret.
 #
+# ONE pipeline (the separate ci.yml that re-ran the same checks is gone): pull
+# requests, including fork PRs, run `ci` only and never read a secret; a push
+# to main runs `ci` and then deploys.
+#
 # CI is the gate: broken code cannot reach the box because deploy-hfville needs
 # ci. The deploy is not done until /healthz on the box echoes the deployed sha —
 # the shim asserts that, and scripts/verify-live.sh asserts it again from here
@@ -22,6 +26,8 @@ name: CI & Deploy
 
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -40,11 +46,19 @@ env:
 permissions:
   contents: read
 
+# Pull requests: a newer push cancels the older run. Pushes to main are keyed
+# by sha, so they never cancel or replace each other (a deploy in flight is
+# never cancelled).
 concurrency:
-  group: "${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: false
+  group: "${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # The gate. Runs on every push and every pull request, including fork PRs, so
+  # it must never need a secret. check-no-secrets runs BEFORE typecheck on
+  # purpose: this repository is PUBLIC and its Actions logs are world-readable,
+  # so a leaked identifier is a worse failure than a type error
+  # (docs/CONTRACTS.md §13).
   ci:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -78,7 +92,7 @@ jobs:
     needs: [ci]
     # Stays skipped (not red) until the box shim, the deploy key and the secrets
     # all exist: flip the TRUCK_DEPLOY_ENABLED repository variable to "1".
-    if: vars.TRUCK_DEPLOY_ENABLED == '1'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.TRUCK_DEPLOY_ENABLED == '1'
     concurrency:
       group: deploy-hfville-linen-truck
       cancel-in-progress: false
